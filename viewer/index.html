@@ -5,8 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>mlbtraj viewer (wireframe)</title>
     <link rel="stylesheet" href="style.css" />
-    <script defer src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-    <script defer src="app.js"></script>
   </head>
   <body>
     <div class="ui">
@@ -43,7 +41,9 @@
       <canvas id="glcanvas"></canvas>
     </div>
     <div class="hint">
-      <p>ワイヤーフレーム表示：球場は線のみ、軌道は色付きで強調。実装後、<code>bundle-viewer --theme config/theme.json</code> で色や線幅を変更できます。</p>
+      <p>ワイヤーフレーム表示：球場は線のみ、軌道は色付きで強調。<br />
+      <code>bundle-viewer --theme config/theme.json</code> で色や線幅を変更できます。</p>
     </div>
+    <script type="module" src="app.js"></script>
   </body>
 </html>
