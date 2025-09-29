@@ -1,3 +1,4 @@
+// viewer/app.js — 互換モード：playlist/config/trajectory の表記ゆれを吸収し、確実に再生させる
 import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
 import {OrbitControls} from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js';
 import {Line2} from 'https://unpkg.com/three@0.160.0/examples/jsm/lines/Line2.js';
@@ -13,7 +14,7 @@ const state = {
   autoAdvance: false,
   followBall: false,
   speed: 1,
-  trajectory: null,
+  trajectory: null,          // [{t,x,y,z}, ...]
   trajectoryMaterial: null,
   trajectoryLine: null,
   duration: 0,
@@ -22,39 +23,84 @@ const state = {
   lastPreset: 'catcher',
 };
 
-let renderer;
-let camera;
-let controls;
-let scene;
-let ball;
-let theme;
-let cameraPresets;
-let clock;
+let renderer, camera, controls, scene, ball, theme, cameraPresets, clock;
 
+// ---------- helpers ----------
+async function fetchJSON(path) {
+  const res = await fetch(path, {cache: 'no-cache'});
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  return await res.json();
+}
+
+// playlist の各プレイを標準化（batter/event/topbot/outs/trajectory_path を揃える）
+function normalizePlay(p) {
+  return {
+    ...p,
+    batter:       p.batter ?? p.player_name ?? '',
+    event:        p.event  ?? p.events      ?? '',
+    topbot:       p.topbot ?? (String(p.inning_half || 'Top').toLowerCase().startsWith('top') ? 'Top' : 'Bot'),
+    outs_when_up: p.outs_when_up ?? p.outs ?? 0,
+    trajectory_path: p.trajectory ?? p.trajectory_file ?? '',   // ← どちらでもOKに
+  };
+}
+
+// 軌道JSONを [{t,x,y,z}, …] に正規化
+function normalizeTrajectory(traj) {
+  if (!traj) return [];
+  // {points: [{t,x,y,z}, ...]}
+  if (Array.isArray(traj.points)) {
+    return traj.points.map(p => ({t:p.t ?? 0, x:p.x, y:p.y, z:p.z}));
+  }
+  // {samples: [[t,x,y,z], ...]}
+  if (Array.isArray(traj.samples)) {
+    return traj.samples.map(([t,x,y,z]) => ({t:t??0, x, y, z}));
+  }
+  // {t:[], x:[], y:[], z:[]}
+  if (Array.isArray(traj.t) && Array.isArray(traj.x) && Array.isArray(traj.y) && Array.isArray(traj.z)) {
+    const n = Math.min(traj.t.length, traj.x.length, traj.y.length, traj.z.length);
+    const out = [];
+    for (let i=0;i<n;i++) out.push({t:traj.t[i]??0, x:traj.x[i], y:traj.y[i], z:traj.z[i]});
+    return out;
+  }
+  // [[x,y,z]] or [[t,x,y,z]]
+  if (Array.isArray(traj) && Array.isArray(traj[0])) {
+    return traj.map(a => (a.length===4 ? ({t:a[0]??0, x:a[1], y:a[2], z:a[3]})
+                                     : ({t:0, x:a[0], y:a[1], z:a[2]})));
+  }
+  console.warn('Unknown trajectory shape:', traj);
+  return [];
+}
+
+// ---------- data load ----------
 async function loadData() {
   const [config, playlist] = await Promise.all([
-    fetch('config.json').then((r) => r.json()),
-    fetch('playlist.json').then((r) => r.json()),
+    fetchJSON('config.json'),
+    fetchJSON('playlist.json'),
   ]);
   theme = config.theme || {};
   cameraPresets = config.camera_presets || {};
-  const plays = playlist.plays || [];
-  const trajectories = await Promise.all(
-    plays.map(async (play) => {
-      const points = await fetch(play.trajectory).then((r) => r.json());
-      return {...play, points};
-    }),
-  );
-  state.plays = trajectories;
-  return config.ballpark;
+
+  const raw = (playlist && playlist.plays) ? playlist.plays : [];
+  const plays = [];
+  for (const rp of raw) {
+    const p = normalizePlay(rp);
+    if (!p.trajectory_path) continue;
+    const trajRaw = await fetchJSON(p.trajectory_path);
+    const points  = normalizeTrajectory(trajRaw);
+    plays.push({...p, points});
+  }
+  state.plays = plays;
+  return config.ballpark; // なくても fallback で描く
 }
 
+// ---------- scene ----------
 function setupScene(ballpark) {
   const canvas = $('glcanvas');
   renderer = new THREE.WebGLRenderer({canvas, antialias: true});
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setClearColor(theme.background || '#f5f7fb');
-  camera = new THREE.PerspectiveCamera(45, 1, 0.1, 2000);
+
+  camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
   scene = new THREE.Scene();
 
   controls = new OrbitControls(camera, renderer.domElement);
@@ -63,12 +109,11 @@ function setupScene(ballpark) {
   controls.target.set(0, 180, 6);
 
   const ballColor = theme.trajectory?.ball_color || theme.trajectory?.color || '#E03C31';
-  const ballGeometry = new THREE.SphereGeometry(1.5, 32, 32);
-  const ballMaterial = new THREE.MeshBasicMaterial({color: ballColor});
-  ball = new THREE.Mesh(ballGeometry, ballMaterial);
+  ball = new THREE.Mesh(new THREE.SphereGeometry(1.5, 32, 32),
+                        new THREE.MeshBasicMaterial({color: ballColor}));
   scene.add(ball);
 
-  addBallparkWireframe(ballpark);
+  addBallparkWireframe(ballpark);   // ワイヤーフレーム（ballpark無くてもfallback描画）
   addGroundGrid();
   applyCameraPreset('catcher');
 
@@ -80,13 +125,10 @@ function setupScene(ballpark) {
 
 function addGroundGrid() {
   if (!theme.ground_grid || theme.ground_grid.enabled === false) return;
-  const size = 600;
-  const divisions = 24;
+  const size = 600, divisions = 24;
   const color = new THREE.Color(theme.ground_grid.line_color || '#E5E9F2');
   const grid = new THREE.GridHelper(size, divisions, color, color);
-  grid.material.opacity = 0.35;
-  grid.material.transparent = true;
-  grid.rotation.x = Math.PI / 2;
+  grid.material.opacity = 0.35; grid.material.transparent = true; grid.rotation.x = Math.PI / 2;
   scene.add(grid);
 }
 
@@ -94,52 +136,61 @@ function addBallparkWireframe(ballpark) {
   const lineColor = new THREE.Color(theme.ballpark?.line_color || '#8892a6');
   const lineWidth = theme.ballpark?.line_width || 1;
   const material = new THREE.LineBasicMaterial({color: lineColor, linewidth: lineWidth});
+  const v = (p) => new THREE.Vector3(p[0], p[1], p[2]);
 
-  const fenceBase = ballpark.fence_base.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
-  const baseGeometry = new THREE.BufferGeometry().setFromPoints(fenceBase);
-  const baseLine = new THREE.LineLoop(baseGeometry, material);
-  scene.add(baseLine);
-
-  const fenceTop = ballpark.fence_top.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
-  const topGeometry = new THREE.BufferGeometry().setFromPoints(fenceTop);
-  const topLine = new THREE.LineLoop(topGeometry, material);
-  scene.add(topLine);
-
-  const wallPoints = [];
-  ballpark.wall_segments.forEach((segment) => {
-    wallPoints.push(...segment[0], ...segment[1]);
-  });
-  if (wallPoints.length) {
-    const wallGeometry = new THREE.BufferGeometry();
-    wallGeometry.setAttribute('position', new THREE.Float32BufferAttribute(wallPoints, 3));
-    const wallLines = new THREE.LineSegments(wallGeometry, material);
-    scene.add(wallLines);
+  // 新実装（ballpark に詳細がある場合）
+  if (ballpark && Array.isArray(ballpark.fence_base) && Array.isArray(ballpark.fence_top)) {
+    const baseGeom = new THREE.BufferGeometry().setFromPoints(ballpark.fence_base.map(v));
+    scene.add(new THREE.LineLoop(baseGeom, material));
+    const topGeom  = new THREE.BufferGeometry().setFromPoints(ballpark.fence_top.map(v));
+    scene.add(new THREE.LineLoop(topGeom, material));
+    if (Array.isArray(ballpark.wall_segments)) {
+      const wallPts = [];
+      ballpark.wall_segments.forEach(seg => { wallPts.push(...seg[0], ...seg[1]); });
+      if (wallPts.length) {
+        const wallGeom = new THREE.BufferGeometry();
+        wallGeom.setAttribute('position', new THREE.Float32BufferAttribute(wallPts, 3));
+        scene.add(new THREE.LineSegments(wallGeom, material));
+      }
+    }
+    if (Array.isArray(ballpark.foul_lines)) {
+      ballpark.foul_lines.forEach(line => {
+        const geom = new THREE.BufferGeometry().setFromPoints(line.map(v));
+        scene.add(new THREE.Line(geom, material));
+      });
+    }
+    return;
   }
 
-  const foulMaterial = new THREE.LineBasicMaterial({color: lineColor, linewidth: lineWidth});
-  ballpark.foul_lines.forEach((line) => {
-    const geom = new THREE.BufferGeometry().setFromPoints(
-      line.map((p) => new THREE.Vector3(p[0], p[1], p[2])),
-    );
-    scene.add(new THREE.Line(geom, foulMaterial));
-  });
+  // fallback（最低限の外野弧 + ファウルライン）
+  const pts = [];
+  for (let a=-90;a<=90;a+=2){ const r=400, rad=a*Math.PI/180; pts.push(new THREE.Vector3(r*Math.sin(rad), r*Math.cos(rad), 0)); }
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), material));
+  const h = 8, top = pts.map(p=>new THREE.Vector3(p.x,p.y,h));
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(top), material));
+  for (let i=0;i<pts.length;i+=10){
+    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([pts[i], top[i]]), material));
+  }
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(-330,0,0)]), material));
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(330,0,0)]), material));
 }
 
 function handleResize() {
   const canvas = renderer.domElement;
-  const width = canvas.clientWidth;
-  const height = canvas.clientHeight;
-  renderer.setSize(width, height, false);
-  camera.aspect = width / height;
+  const w = canvas.clientWidth, h = canvas.clientHeight || 1;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  if (state.trajectoryMaterial) {
-    state.trajectoryMaterial.resolution.set(width, height);
-  }
+  if (state.trajectoryMaterial) state.trajectoryMaterial.resolution.set(w, h);
 }
 
 function applyCameraPreset(name) {
-  const preset = cameraPresets[name] || cameraPresets.catcher;
-  if (!preset) return;
+  const preset = (cameraPresets && cameraPresets[name]) || cameraPresets?.catcher ||
+                 (name==='if_high' ? {pos:[0,-120,55],lookAt:[0,140,10]} :
+                  name==='cf_stand'? {pos:[0,420,70], lookAt:[0,200,10]} :
+                  name==='lf_stand'? {pos:[-260,180,50],lookAt:[0,200,10]} :
+                  name==='rf_stand'? {pos:[260,180,50], lookAt:[0,200,10]} :
+                                     {pos:[-5,-20,6],  lookAt:[0,60,6]});
   state.lastPreset = name;
   camera.position.set(...preset.pos);
   controls.target.set(...preset.lookAt);
@@ -147,79 +198,67 @@ function applyCameraPreset(name) {
 }
 
 function updateOverlay(play) {
-  $('ovInning').textContent = `Inning: ${play.inning} ${play.inning_half}`;
-  $('ovOuts').textContent = `Outs: ${play.outs}`;
-  $('ovBatter').textContent = `Batter: ${play.player_name}`;
-  $('ovEvent').textContent = `Event: ${play.events}`;
+  $('ovInning').textContent = `Inning: ${play.inning ?? '-'} ${play.topbot ?? '-'}`;
+  $('ovOuts').textContent   = `Outs: ${play.outs_when_up ?? '-'}`;
+  $('ovBatter').textContent = `Batter: ${play.batter ?? '-'}`;
+  $('ovEvent').textContent  = `Event: ${play.event ?? '-'}`;
 }
 
 function setupTrajectory(play) {
+  // 既存線の破棄
   if (state.trajectoryLine) {
     scene.remove(state.trajectoryLine);
-    state.trajectoryLine.geometry.dispose();
-    state.trajectoryMaterial.dispose();
+    state.trajectoryLine.geometry?.dispose?.();
+    state.trajectoryMaterial?.dispose?.();
+    state.trajectoryLine = null;
+    state.trajectoryMaterial = null;
   }
+  // Line2 で太線
   const lineWidth = theme.trajectory?.line_width || 4;
   const color = new THREE.Color(theme.trajectory?.color || '#E03C31');
   const geometry = new LineGeometry();
   const positions = [];
-  play.points.forEach((p) => {
-    positions.push(p.x, p.y, p.z);
-  });
+  play.points.forEach(p => { positions.push(p.x, p.y, p.z); });
   geometry.setPositions(positions);
-  const material = new LineMaterial({
-    color,
-    linewidth: lineWidth,
-    transparent: false,
-    worldUnits: false,
-  });
+  const material = new LineMaterial({ color, linewidth: lineWidth, transparent: false, worldUnits: false });
   material.resolution.set(renderer.domElement.clientWidth, renderer.domElement.clientHeight);
   const line = new Line2(geometry, material);
   line.computeLineDistances();
+  scene.add(line);
+
   state.trajectoryLine = line;
   state.trajectoryMaterial = material;
-  scene.add(line);
   state.trajectory = play.points;
-  state.duration = play.points.at(-1).t;
+  state.duration = play.points.at(-1).t ?? (play.points.length / 60); // tが無ければ仮
   state.time = 0;
   state.segmentIndex = 0;
+
   updateBallPosition(0);
   clock?.start();
 }
 
+function sampleTrajectory(points, t) {
+  if (!points.length) return {x:0,y:0,z:0};
+  if (t <= (points[0].t ?? 0)) return {x:points[0].x, y:points[0].y, z:points[0].z};
+  if (t >= (points.at(-1).t ?? 0)) { const p = points.at(-1); return {x:p.x, y:p.y, z:p.z}; }
+  let idx = state.segmentIndex;
+  while (idx < points.length - 2 && (points[idx + 1].t ?? 0) < t) idx++;
+  while (idx > 0 && (points[idx].t ?? 0) > t) idx--;
+  state.segmentIndex = idx;
+  const p0 = points[idx], p1 = points[idx + 1];
+  const span = (p1.t ?? 0) - (p0.t ?? 0) || 1e-6;
+  const a = (t - (p0.t ?? 0)) / span;
+  return { x: p0.x + (p1.x - p0.x) * a, y: p0.y + (p1.y - p0.y) * a, z: p0.z + (p1.z - p0.z) * a };
+}
+
 function updateBallPosition(time) {
   if (!state.trajectory) return;
-  const sample = sampleTrajectory(state.trajectory, time);
-  ball.position.set(sample.x, sample.y, sample.z);
-  if (state.followBall) {
-    controls.target.copy(ball.position);
-  }
+  const p = sampleTrajectory(state.trajectory, time);
+  ball.position.set(p.x, p.y, p.z);
+  if (state.followBall) controls.target.copy(ball.position);
 }
 
-function sampleTrajectory(points, t) {
-  if (t <= points[0].t) {
-    return {x: points[0].x, y: points[0].y, z: points[0].z};
-  }
-  if (t >= points.at(-1).t) {
-    const p = points.at(-1);
-    return {x: p.x, y: p.y, z: p.z};
-  }
-  let idx = state.segmentIndex;
-  while (idx < points.length - 2 && points[idx + 1].t < t) idx++;
-  while (idx > 0 && points[idx].t > t) idx--;
-  state.segmentIndex = idx;
-  const p0 = points[idx];
-  const p1 = points[idx + 1];
-  const span = p1.t - p0.t || 1e-6;
-  const alpha = (t - p0.t) / span;
-  return {
-    x: p0.x + (p1.x - p0.x) * alpha,
-    y: p0.y + (p1.y - p0.y) * alpha,
-    z: p0.z + (p1.z - p0.z) * alpha,
-  };
-}
-
-function attachUI(ballpark) {
+function attachUI() {
   $('#btnStart').addEventListener('click', () => setPlay(0));
   $('#btnPrev').addEventListener('click', () => setPlay(Math.max(0, state.currentIndex - 1)));
   $('#btnNext').addEventListener('click', () => setPlay(Math.min(state.plays.length - 1, state.currentIndex + 1)));
@@ -231,13 +270,10 @@ function attachUI(ballpark) {
   });
   $('#chkFollow').addEventListener('change', (e) => {
     state.followBall = e.target.checked;
-    if (state.followBall) {
-      controls.target.copy(ball.position);
-    } else {
+    if (state.followBall) controls.target.copy(ball.position);
+    else {
       const preset = cameraPresets[state.lastPreset] || cameraPresets.catcher;
-      if (preset) {
-        controls.target.set(...preset.lookAt);
-      }
+      if (preset) controls.target.set(...preset.lookAt);
     }
     controls.update();
   });
@@ -246,11 +282,7 @@ function attachUI(ballpark) {
 function togglePlay(force) {
   const desired = typeof force === 'boolean' ? force : !state.playing;
   state.playing = desired;
-  if (state.playing) {
-    clock?.start();
-  } else {
-    clock?.stop();
-  }
+  if (state.playing) clock?.start(); else clock?.stop();
   $('#btnPlayPause').textContent = state.playing ? 'Pause' : 'Play';
 }
 
@@ -258,6 +290,7 @@ function setPlay(index) {
   index = Math.max(0, Math.min(state.plays.length - 1, index));
   state.currentIndex = index;
   const play = state.plays[index];
+  if (!play) return;
   updateOverlay(play);
   setupTrajectory(play);
   togglePlay(false);
@@ -281,16 +314,14 @@ function animate() {
   renderer.render(scene, camera);
 }
 
+// ---------- boot ----------
 async function init() {
-  const ballpark = await loadData();
+  const ballpark = await loadData();   // state.plays が埋まる
   setupScene(ballpark);
-  attachUI(ballpark);
-  if (state.plays.length) {
-    setPlay(0);
-  }
+  attachUI();
+  if (state.plays.length) setPlay(0);
   animate();
 }
 
-init().catch((err) => {
-  console.error('Failed to initialise viewer', err);
-});
+init().catch((err) => console.error('Failed to initialise viewer', err));
+
