@@ -1,9 +1,9 @@
-// viewer/app.js — 互換モード：playlist/config/trajectory の表記ゆれを吸収し、確実に再生させる
-import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
-import {OrbitControls} from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js';
-import {Line2} from 'https://unpkg.com/three@0.160.0/examples/jsm/lines/Line2.js';
-import {LineGeometry} from 'https://unpkg.com/three@0.160.0/examples/jsm/lines/LineGeometry.js';
-import {LineMaterial} from 'https://unpkg.com/three@0.160.0/examples/jsm/lines/LineMaterial.js';
+// viewer/app.js — 互換モード：配列オブジェクト軌道 & ID指定修正
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {Line2} from 'three/addons/lines/Line2.js';
+import {LineGeometry} from 'three/addons/lines/LineGeometry.js';
+import {LineMaterial} from 'three/addons/lines/LineMaterial.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,7 +23,7 @@ const state = {
   lastPreset: 'catcher',
 };
 
-let renderer, camera, controls, scene, ball, theme, cameraPresets, clock;
+let renderer, scene, camera, controls, ball, theme, cameraPresets, clock;
 
 // ---------- helpers ----------
 async function fetchJSON(path) {
@@ -31,41 +31,46 @@ async function fetchJSON(path) {
   if (!res.ok) throw new Error(`${path}: ${res.status}`);
   return await res.json();
 }
-
-// playlist の各プレイを標準化（batter/event/topbot/outs/trajectory_path を揃える）
+function toTopBot(v) {
+  const s = String(v || 'Top').toLowerCase();
+  return s.startsWith('top') ? 'Top' : 'Bot';
+}
 function normalizePlay(p) {
   return {
     ...p,
     batter:       p.batter ?? p.player_name ?? '',
     event:        p.event  ?? p.events      ?? '',
-    topbot:       p.topbot ?? (String(p.inning_half || 'Top').toLowerCase().startsWith('top') ? 'Top' : 'Bot'),
+    topbot:       p.topbot ?? toTopBot(p.inning_half),
     outs_when_up: p.outs_when_up ?? p.outs ?? 0,
-    trajectory_path: p.trajectory ?? p.trajectory_file ?? '',   // ← どちらでもOKに
+    trajectory_path: p.trajectory ?? p.trajectory_file ?? '',
   };
 }
-
 // 軌道JSONを [{t,x,y,z}, …] に正規化
 function normalizeTrajectory(traj) {
   if (!traj) return [];
   // {points: [{t,x,y,z}, ...]}
   if (Array.isArray(traj.points)) {
-    return traj.points.map(p => ({t:p.t ?? 0, x:p.x, y:p.y, z:p.z}));
+    return traj.points.map(p => ({t:p.t??0, x:p.x, y:p.y, z:p.z??0}));
   }
   // {samples: [[t,x,y,z], ...]}
   if (Array.isArray(traj.samples)) {
-    return traj.samples.map(([t,x,y,z]) => ({t:t??0, x, y, z}));
+    return traj.samples.map(([t,x,y,z]) => ({t:t??0, x, y, z:z??0}));
   }
   // {t:[], x:[], y:[], z:[]}
   if (Array.isArray(traj.t) && Array.isArray(traj.x) && Array.isArray(traj.y) && Array.isArray(traj.z)) {
     const n = Math.min(traj.t.length, traj.x.length, traj.y.length, traj.z.length);
     const out = [];
-    for (let i=0;i<n;i++) out.push({t:traj.t[i]??0, x:traj.x[i], y:traj.y[i], z:traj.z[i]});
+    for (let i=0;i<n;i++) out.push({t:traj.t[i]??0, x:traj.x[i], y:traj.y[i], z:traj.z[i]??0});
     return out;
   }
   // [[x,y,z]] or [[t,x,y,z]]
   if (Array.isArray(traj) && Array.isArray(traj[0])) {
-    return traj.map(a => (a.length===4 ? ({t:a[0]??0, x:a[1], y:a[2], z:a[3]})
-                                     : ({t:0, x:a[0], y:a[1], z:a[2]})));
+    return traj.map(a => (a.length===4 ? ({t:a[0]??0, x:a[1], y:a[2], z:a[3]??0})
+                                     : ({t:0, x:a[0], y:a[1], z:a[2]??0})));
+  }
+  // ★ 配列の中がオブジェクト [{x:..,y:..,z:..,t?}, ...] に対応
+  if (Array.isArray(traj) && typeof traj[0] === 'object' && traj[0] !== null && 'x' in traj[0] && 'y' in traj[0]) {
+    return traj.map(p => ({t:('t' in p ? p.t : 0), x:p.x, y:p.y, z:('z' in p ? p.z : 0)}));
   }
   console.warn('Unknown trajectory shape:', traj);
   return [];
@@ -113,7 +118,7 @@ function setupScene(ballpark) {
                         new THREE.MeshBasicMaterial({color: ballColor}));
   scene.add(ball);
 
-  addBallparkWireframe(ballpark);   // ワイヤーフレーム（ballpark無くてもfallback描画）
+  addBallparkWireframe(ballpark);   // ワイヤーフレーム
   addGroundGrid();
   applyCameraPreset('catcher');
 
@@ -138,7 +143,6 @@ function addBallparkWireframe(ballpark) {
   const material = new THREE.LineBasicMaterial({color: lineColor, linewidth: lineWidth});
   const v = (p) => new THREE.Vector3(p[0], p[1], p[2]);
 
-  // 新実装（ballpark に詳細がある場合）
   if (ballpark && Array.isArray(ballpark.fence_base) && Array.isArray(ballpark.fence_top)) {
     const baseGeom = new THREE.BufferGeometry().setFromPoints(ballpark.fence_base.map(v));
     scene.add(new THREE.LineLoop(baseGeom, material));
@@ -162,7 +166,7 @@ function addBallparkWireframe(ballpark) {
     return;
   }
 
-  // fallback（最低限の外野弧 + ファウルライン）
+  // fallback（簡易外野弧＋ファウルライン）
   const pts = [];
   for (let a=-90;a<=90;a+=2){ const r=400, rad=a*Math.PI/180; pts.push(new THREE.Vector3(r*Math.sin(rad), r*Math.cos(rad), 0)); }
   scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), material));
@@ -199,13 +203,12 @@ function applyCameraPreset(name) {
 
 function updateOverlay(play) {
   $('ovInning').textContent = `Inning: ${play.inning ?? '-'} ${play.topbot ?? '-'}`;
-  $('ovOuts').textContent   = `Outs: ${play.outs_when_up ?? '-'}`;
+  $('ovOuts'  ).textContent = `Outs: ${play.outs_when_up ?? '-'}`;
   $('ovBatter').textContent = `Batter: ${play.batter ?? '-'}`;
-  $('ovEvent').textContent  = `Event: ${play.event ?? '-'}`;
+  $('ovEvent' ).textContent = `Event: ${play.event ?? '-'}`;
 }
 
 function setupTrajectory(play) {
-  // 既存線の破棄
   if (state.trajectoryLine) {
     scene.remove(state.trajectoryLine);
     state.trajectoryLine.geometry?.dispose?.();
@@ -213,7 +216,6 @@ function setupTrajectory(play) {
     state.trajectoryLine = null;
     state.trajectoryMaterial = null;
   }
-  // Line2 で太線
   const lineWidth = theme.trajectory?.line_width || 4;
   const color = new THREE.Color(theme.trajectory?.color || '#E03C31');
   const geometry = new LineGeometry();
@@ -229,7 +231,7 @@ function setupTrajectory(play) {
   state.trajectoryLine = line;
   state.trajectoryMaterial = material;
   state.trajectory = play.points;
-  state.duration = play.points.at(-1).t ?? (play.points.length / 60); // tが無ければ仮
+  state.duration = play.points.at(-1).t ?? (play.points.length / 60);
   state.time = 0;
   state.segmentIndex = 0;
 
@@ -239,8 +241,9 @@ function setupTrajectory(play) {
 
 function sampleTrajectory(points, t) {
   if (!points.length) return {x:0,y:0,z:0};
-  if (t <= (points[0].t ?? 0)) return {x:points[0].x, y:points[0].y, z:points[0].z};
-  if (t >= (points.at(-1).t ?? 0)) { const p = points.at(-1); return {x:p.x, y:p.y, z:p.z}; }
+  const t0 = points[0].t ?? 0, tn = points.at(-1).t ?? 0;
+  if (t <= t0) return {x:points[0].x, y:points[0].y, z:points[0].z};
+  if (t >= tn) { const p = points.at(-1); return {x:p.x, y:p.y, z:p.z}; }
   let idx = state.segmentIndex;
   while (idx < points.length - 2 && (points[idx + 1].t ?? 0) < t) idx++;
   while (idx > 0 && (points[idx].t ?? 0) > t) idx--;
@@ -259,16 +262,16 @@ function updateBallPosition(time) {
 }
 
 function attachUI() {
-  $('#btnStart').addEventListener('click', () => setPlay(0));
-  $('#btnPrev').addEventListener('click', () => setPlay(Math.max(0, state.currentIndex - 1)));
-  $('#btnNext').addEventListener('click', () => setPlay(Math.min(state.plays.length - 1, state.currentIndex + 1)));
-  $('#btnPlayPause').addEventListener('click', () => togglePlay());
-  $('#chkAuto').addEventListener('change', (e) => (state.autoAdvance = e.target.checked));
-  $('#selSpeed').addEventListener('change', (e) => (state.speed = parseFloat(e.target.value)));
+  $('btnStart').addEventListener('click', () => setPlay(0));
+  $('btnPrev').addEventListener('click', () => setPlay(Math.max(0, state.currentIndex - 1)));
+  $('btnNext').addEventListener('click', () => setPlay(Math.min(state.plays.length - 1, state.currentIndex + 1)));
+  $('btnPlayPause').addEventListener('click', () => togglePlay());
+  $('chkAuto').addEventListener('change', (e) => (state.autoAdvance = e.target.checked));
+  $('selSpeed').addEventListener('change', (e) => (state.speed = parseFloat(e.target.value)));
   document.querySelectorAll('[data-view]').forEach((btn) => {
     btn.addEventListener('click', () => applyCameraPreset(btn.dataset.view));
   });
-  $('#chkFollow').addEventListener('change', (e) => {
+  $('chkFollow').addEventListener('change', (e) => {
     state.followBall = e.target.checked;
     if (state.followBall) controls.target.copy(ball.position);
     else {
@@ -283,7 +286,7 @@ function togglePlay(force) {
   const desired = typeof force === 'boolean' ? force : !state.playing;
   state.playing = desired;
   if (state.playing) clock?.start(); else clock?.stop();
-  $('#btnPlayPause').textContent = state.playing ? 'Pause' : 'Play';
+  $('btnPlayPause').textContent = state.playing ? 'Pause' : 'Play';
 }
 
 function setPlay(index) {
@@ -316,12 +319,14 @@ function animate() {
 
 // ---------- boot ----------
 async function init() {
-  const ballpark = await loadData();   // state.plays が埋まる
+  const ballpark = await loadData();
   setupScene(ballpark);
   attachUI();
   if (state.plays.length) setPlay(0);
   animate();
 }
+init().catch(err => console.error('Failed to initialise viewer', err));
+
 
 init().catch((err) => console.error('Failed to initialise viewer', err));
 
