@@ -1,0 +1,36 @@
+{
+  "schema": "mlbtraj/ballpark-registry-v1",
+  "parks": [
+    {
+      "slug": "lad-dodger-stadium",
+      "name": "Dodger Stadium",
+      "aliases": [
+        "lad",
+        "dodgers",
+        "dodger-stadium"
+      ],
+      "venue_ids": [
+        22
+      ],
+      "versions": {
+        "2024": "data/ballparks/lad-dodger-stadium/2024.json"
+      }
+    },
+    {
+      "slug": "sea-t-mobile-park",
+      "name": "T-Mobile Park",
+      "aliases": [
+        "sea",
+        "mariners",
+        "tmobile",
+        "safeco"
+      ],
+      "venue_ids": [
+        680
+      ],
+      "versions": {
+        "2024": "data/ballparks/sea-t-mobile-park/2024.json"
+      }
+    }
+  ]
+}
