@@ -1,8 +1,43 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "mlbtraj"
-version = "0.0.0"
-description = "Statcast-based 3D trajectory viewer scaffold (wireframe edition)"
+version = "0.1.0"
+description = "Statcast-based 3D trajectory simulator and wireframe viewer"
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{name = "YOUR_NAME"}]
+authors = [{name = "OpenAI Codex"}]
 license = {text = "MIT"}
+dependencies = []
+
+[project.scripts]
+mlbtraj = "mlbtraj.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.4",
+  "mypy>=1.8",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra"
+filterwarnings = "error"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
