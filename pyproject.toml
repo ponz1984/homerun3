@@ -1,0 +1,8 @@
+[project]
+name = "mlbtraj"
+version = "0.0.0"
+description = "Statcast-based 3D trajectory viewer scaffold (wireframe edition)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "YOUR_NAME"}]
+license = {text = "MIT"}
