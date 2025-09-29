@@ -1,0 +1,24 @@
+{
+  "default": {
+    "cd_model": {
+      "type": "piecewise_linear",
+      "knots_mph": [
+        0,
+        50,
+        100,
+        150
+      ],
+      "values": [
+        0.35,
+        0.36,
+        0.34,
+        0.32
+      ]
+    },
+    "cl_model": {
+      "type": "spin_ratio_capped",
+      "c1": 0.09,
+      "max": 0.3
+    }
+  }
+}

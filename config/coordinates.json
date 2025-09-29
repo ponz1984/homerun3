@@ -1,0 +1,9 @@
+{
+  "hc_transform": {
+    "x_offset": 125.42,
+    "y_offset": 198.27,
+    "angle_scale": 1.0,
+    "angle_offset_deg": 0.0,
+    "convention": "atan2(hc_x - x_offset, y_offset - hc_y)"
+  }
+}

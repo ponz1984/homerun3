@@ -1,0 +1,20 @@
+{
+  "background": "#f5f7fb",
+  "ballpark": {
+    "line_color": "#8892a6",
+    "line_width": 1.0
+  },
+  "ground_grid": {
+    "enabled": true,
+    "line_color": "#E5E9F2",
+    "line_width": 1.0
+  },
+  "trajectory": {
+    "color": "#E03C31",
+    "line_width": 3.0,
+    "ball_color": "#E03C31"
+  },
+  "overlay": {
+    "text_color": "#333333"
+  }
+}
