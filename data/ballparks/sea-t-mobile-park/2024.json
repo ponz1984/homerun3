@@ -1,0 +1,88 @@
+{
+  "schema": "mlbtraj/ballpark-v1",
+  "slug": "sea-t-mobile-park",
+  "name": "T-Mobile Park",
+  "year": 2024,
+  "distance_by_label_ft": {
+    "LF": 331,
+    "SLF": 353,
+    "LFA": 368,
+    "LCF": 378,
+    "CF": 401,
+    "RCF": 381,
+    "RFA": 357,
+    "SRF": 340,
+    "RF": 326
+  },
+  "wall_height_ft": {
+    "LF": 8,
+    "LCF": 8,
+    "CF": 8,
+    "RCF": 8,
+    "RF": 8
+  },
+  "angle_convention": "FanGraphs (RF=0\u00b0, CCW\u2192LF=90\u00b0)",
+  "interpolation": "polyline",
+  "camera_presets": {
+    "catcher": {
+      "pos": [
+        -5,
+        -20,
+        6
+      ],
+      "lookAt": [
+        0,
+        60,
+        6
+      ]
+    },
+    "if_high": {
+      "pos": [
+        0,
+        -120,
+        55
+      ],
+      "lookAt": [
+        0,
+        140,
+        10
+      ]
+    },
+    "lf_stand": {
+      "pos": [
+        -260,
+        180,
+        55
+      ],
+      "lookAt": [
+        0,
+        200,
+        10
+      ]
+    },
+    "cf_stand": {
+      "pos": [
+        0,
+        430,
+        75
+      ],
+      "lookAt": [
+        0,
+        200,
+        10
+      ]
+    },
+    "rf_stand": {
+      "pos": [
+        260,
+        180,
+        55
+      ],
+      "lookAt": [
+        0,
+        200,
+        10
+      ]
+    }
+  }
+}
