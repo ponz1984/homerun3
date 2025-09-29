@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>mlbtraj viewer (wireframe)</title>
+    <link rel="stylesheet" href="style.css" />
+    <script defer src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script defer src="app.js"></script>
+  </head>
+  <body>
+    <div class="ui">
+      <div class="controls">
+        <button id="btnStart">Start</button>
+        <button id="btnPrev">Prev</button>
+        <button id="btnPlayPause">Play</button>
+        <button id="btnNext">Next</button>
+        <label><input type="checkbox" id="chkAuto" /> Auto</label>
+        <label>Speed
+          <select id="selSpeed">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+      </div>
+      <div class="views">
+        <button data-view="catcher">Catcher</button>
+        <button data-view="if_high">IF High</button>
+        <button data-view="lf_stand">LF Stand</button>
+        <button data-view="cf_stand">CF Stand</button>
+        <button data-view="rf_stand">RF Stand</button>
+        <label><input type="checkbox" id="chkFollow" /> Follow Ball</label>
+      </div>
+      <div class="overlay" id="overlay">
+        <span id="ovInning">Inning: -</span>
+        <span id="ovOuts">Outs: -</span>
+        <span id="ovBatter">Batter: -</span>
+        <span id="ovEvent">Event: -</span>
+      </div>
+    </div>
+    <div id="canvasWrap">
+      <canvas id="glcanvas"></canvas>
+    </div>
+    <div class="hint">
+      <p>ワイヤーフレーム表示：球場は線のみ、軌道は色付きで強調。実装後、<code>bundle-viewer --theme config/theme.json</code> で色や線幅を変更できます。</p>
+    </div>
+  </body>
+</html>
