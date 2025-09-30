@@ -11,13 +11,20 @@
   },
   "trajectory": {
     "color": "#2563EB",
+    "ghost_color": "#93C5FD",
     "line_width": 3.0,
-    "ball_radius": 1.2
+    "ball_radius": 0.6
   },
   "animation": {
     "mode": "reveal_with_ball",
     "duration_seconds": 1.5,
-    "ease": "linear"
+    "ease": "linear",
+    "ghost": {
+      "enabled": true,
+      "segments": 80,
+      "opacity": 0.35
+    },
+    "strict_direction": true
   },
   "overlay": {
     "text_color": "#333333"
