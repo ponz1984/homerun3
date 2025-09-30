@@ -36,6 +36,8 @@ const state = {
   trajectory: null,          // [{t,x,y,z}, ...]
   trajectoryMaterial: null,
   trajectoryLine: null,
+  trajectoryGuideLine: null,
+  trajectoryGuideMaterial: null,
   duration: 0,
   time: 0,
   currentPointIndex: 0,
@@ -57,6 +59,7 @@ const state = {
 let renderer, scene, camera, controls, ball, theme, cameraPresets, clock;
 let adjustLastTime = null;
 const activeKeyAdjust = new Set();
+let ballparkBounds = null;
 const KEY_ADJUST_BINDINGS = {
   a: {type: 'yaw', dir: -1},
   d: {type: 'yaw', dir: 1},
@@ -81,6 +84,13 @@ const BASE_OUTFIELD_PRESETS = {
 };
 
 const ORIGIN_LOOK_AT = [0, 0, 6];
+const OUTFIELD_FRAMING_PRESETS = new Set(['lf_stand', 'cf_stand', 'rf_stand']);
+
+function shouldFrameOutfieldPreset(mode, preset) {
+  if (mode !== 'outfield') return false;
+  if (!preset) return false;
+  return OUTFIELD_FRAMING_PRESETS.has(preset);
+}
 
 function toVec3(arr, fallback) {
   if (!Array.isArray(arr) || arr.length < 3) return [...fallback];
@@ -419,6 +429,22 @@ async function loadData() {
   return config.ballpark; // なくても fallback で描く
 }
 
+function resetBallparkBounds() {
+  if (!ballparkBounds) ballparkBounds = new THREE.Box3();
+  ballparkBounds.makeEmpty();
+}
+
+function expandBallparkBounds(point) {
+  if (!point) return;
+  if (!ballparkBounds) resetBallparkBounds();
+  ballparkBounds.expandByPoint(point);
+}
+
+function getBallparkBounds() {
+  if (!ballparkBounds || ballparkBounds.isEmpty()) return null;
+  return ballparkBounds;
+}
+
 // ---------- scene ----------
 function setupScene(ballpark) {
   const canvas = $('glcanvas');
@@ -426,7 +452,7 @@ function setupScene(ballpark) {
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setClearColor(theme.background || '#f5f7fb');
 
-  camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
+  camera = new THREE.PerspectiveCamera(45, 1, 0.1, 10000);
   camera.up.set(0, 0, 1);
   scene = new THREE.Scene();
 
@@ -453,6 +479,7 @@ function setupScene(ballpark) {
   scene.add(ball);
   resetBallAppearance();
 
+  resetBallparkBounds();
   addBallparkWireframe(ballpark);   // ワイヤーフレーム
   addGroundGrid();
   applyCameraPreset('catcher', {mode: state.cameraMode});
@@ -477,16 +504,57 @@ function addBallparkWireframe(ballpark) {
   const lineColor = new THREE.Color(theme.ballpark?.line_color || '#8892a6');
   const lineWidth = theme.ballpark?.line_width || 1;
   const material = new THREE.LineBasicMaterial({color: lineColor, linewidth: lineWidth});
-  const v = (p) => new THREE.Vector3(p[0], p[1], p[2]);
+  const toVec = (p) => {
+    if (!p) return null;
+    if (Array.isArray(p)) {
+      const x = Number(p[0]) || 0;
+      const y = Number(p[1]) || 0;
+      const z = Number(p[2]) || 0;
+      return new THREE.Vector3(x, y, z);
+    }
+    if (typeof p === 'object') {
+      const x = Number(p.x) || 0;
+      const y = Number(p.y) || 0;
+      const z = Number(p.z) || 0;
+      return new THREE.Vector3(x, y, z);
+    }
+    return null;
+  };
+  const mapPoints = (arr) => {
+    if (!Array.isArray(arr)) return [];
+    return arr.map(toVec).filter((pt) => {
+      if (!pt) return false;
+      expandBallparkBounds(pt);
+      return true;
+    });
+  };
 
   if (ballpark && Array.isArray(ballpark.fence_base) && Array.isArray(ballpark.fence_top)) {
-    const baseGeom = new THREE.BufferGeometry().setFromPoints(ballpark.fence_base.map(v));
-    scene.add(new THREE.LineLoop(baseGeom, material));
-    const topGeom  = new THREE.BufferGeometry().setFromPoints(ballpark.fence_top.map(v));
-    scene.add(new THREE.LineLoop(topGeom, material));
+    const basePts = mapPoints(ballpark.fence_base);
+    if (basePts.length) {
+      const baseGeom = new THREE.BufferGeometry().setFromPoints(basePts);
+      scene.add(new THREE.LineLoop(baseGeom, material));
+    }
+    const topPts = mapPoints(ballpark.fence_top);
+    if (topPts.length) {
+      const topGeom  = new THREE.BufferGeometry().setFromPoints(topPts);
+      scene.add(new THREE.LineLoop(topGeom, material));
+    }
     if (Array.isArray(ballpark.wall_segments)) {
       const wallPts = [];
-      ballpark.wall_segments.forEach(seg => { wallPts.push(...seg[0], ...seg[1]); });
+      ballpark.wall_segments.forEach((seg) => {
+        if (!Array.isArray(seg) || seg.length < 2) return;
+        const a = toVec(seg[0]);
+        const b = toVec(seg[1]);
+        if (a) {
+          wallPts.push(a.x, a.y, a.z);
+          expandBallparkBounds(a);
+        }
+        if (b) {
+          wallPts.push(b.x, b.y, b.z);
+          expandBallparkBounds(b);
+        }
+      });
       if (wallPts.length) {
         const wallGeom = new THREE.BufferGeometry();
         wallGeom.setAttribute('position', new THREE.Float32BufferAttribute(wallPts, 3));
@@ -494,25 +562,81 @@ function addBallparkWireframe(ballpark) {
       }
     }
     if (Array.isArray(ballpark.foul_lines)) {
-      ballpark.foul_lines.forEach(line => {
-        const geom = new THREE.BufferGeometry().setFromPoints(line.map(v));
+      ballpark.foul_lines.forEach((line) => {
+        const pts = mapPoints(line);
+        if (!pts.length) return;
+        const geom = new THREE.BufferGeometry().setFromPoints(pts);
         scene.add(new THREE.Line(geom, material));
       });
+    }
+    if (Array.isArray(ballpark.outline)) {
+      const outlinePts = mapPoints(ballpark.outline);
+      if (outlinePts.length) {
+        const outlineGeom = new THREE.BufferGeometry().setFromPoints(outlinePts);
+        scene.add(new THREE.LineLoop(outlineGeom, material));
+      }
     }
     return;
   }
 
   // fallback（簡易外野弧＋ファウルライン）
   const pts = [];
-  for (let a=-90;a<=90;a+=2){ const r=400, rad=a*Math.PI/180; pts.push(new THREE.Vector3(r*Math.sin(rad), r*Math.cos(rad), 0)); }
-  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), material));
-  const h = 8, top = pts.map(p=>new THREE.Vector3(p.x,p.y,h));
-  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(top), material));
-  for (let i=0;i<pts.length;i+=10){
-    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([pts[i], top[i]]), material));
+  for (let a = -90; a <= 90; a += 2) {
+    const r = 400;
+    const rad = a * Math.PI / 180;
+    const pt = new THREE.Vector3(r * Math.sin(rad), r * Math.cos(rad), 0);
+    pts.push(pt);
+    expandBallparkBounds(pt);
   }
-  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(-330,0,0)]), material));
-  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(330,0,0)]), material));
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), material));
+  const h = 8;
+  const top = pts.map((p) => {
+    const t = new THREE.Vector3(p.x, p.y, h);
+    expandBallparkBounds(t);
+    return t;
+  });
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(top), material));
+  for (let i = 0; i < pts.length; i += 10) {
+    const bottom = pts[i];
+    const upper = top[i];
+    if (bottom) expandBallparkBounds(bottom);
+    if (upper) expandBallparkBounds(upper);
+    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([bottom, upper]), material));
+  }
+  const foulLeft = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(-330, 0, 0)];
+  const foulRight = [new THREE.Vector3(0, 0, 0), new THREE.Vector3(330, 0, 0)];
+  foulLeft.forEach(expandBallparkBounds);
+  foulRight.forEach(expandBallparkBounds);
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(foulLeft), material));
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(foulRight), material));
+}
+
+function frameBallpark(options = {}) {
+  if (!camera || !controls) return;
+  const bounds = getBallparkBounds();
+  if (!bounds) return;
+  const center = bounds.getCenter(tmpVecA);
+  const size = bounds.getSize(tmpVecB);
+  const radius = 0.5 * Math.max(size.x, size.y);
+  if (!Number.isFinite(radius) || radius <= 0) return;
+  const marginRaw = Number(options.margin);
+  const margin = Number.isFinite(marginRaw) ? Math.max(1, marginRaw) : 1.2;
+  const vFov = THREE.MathUtils.degToRad(camera.fov);
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  const minFov = Math.min(vFov, hFov);
+  if (!(minFov > 0)) return;
+  const need = radius / Math.tan(minFov / 2) * margin;
+  const dir = tmpVecC.copy(camera.position).sub(center);
+  if (dir.lengthSq() < 1e-6) {
+    dir.set(0, -1, 0);
+  } else {
+    dir.normalize();
+  }
+  camera.position.copy(center).addScaledVector(dir, need);
+  const target = (state.followBall && ball) ? ball.position : center;
+  controls.target.copy(target);
+  camera.updateProjectionMatrix();
+  controls.update();
 }
 
 function handleResize() {
@@ -522,11 +646,15 @@ function handleResize() {
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   if (state.trajectoryMaterial) state.trajectoryMaterial.resolution.set(w, h);
+  if (state.trajectoryGuideMaterial) state.trajectoryGuideMaterial.resolution.set(w, h);
 }
 
 function handleWindowResize() {
   refreshCanvasOffset();
   handleResize();
+  if (shouldFrameOutfieldPreset(state.cameraMode, state.lastPreset)) {
+    frameBallpark();
+  }
 }
 
 function applyCameraPreset(name, options = {}) {
@@ -546,6 +674,9 @@ function applyCameraPreset(name, options = {}) {
   }
   controls.update();
   resetViewAdjust();
+  if (shouldFrameOutfieldPreset(state.cameraMode, name)) {
+    frameBallpark();
+  }
   const select = $('selCameraMode');
   if (select && select.value !== state.cameraMode) {
     select.value = state.cameraMode;
@@ -576,7 +707,12 @@ function setupTrajectory(play) {
   const color = new THREE.Color(theme.trajectory?.color || DEFAULT_TRAJECTORY_COLOR);
   const geometry = new LineGeometry();
   const positions = [];
-  play.points.forEach(p => { positions.push(p.x, p.y, p.z); });
+  play.points.forEach((p) => {
+    const x = Number(p.x) || 0;
+    const y = Number(p.y) || 0;
+    const z = Number(p.z) || 0;
+    positions.push(x, y, z);
+  });
   geometry.setPositions(positions);
   geometry.setDrawRange(0, 0);
   const material = new LineMaterial({ color, linewidth: lineWidth, transparent: true, worldUnits: false });
@@ -587,8 +723,26 @@ function setupTrajectory(play) {
   line.visible = state.showTrajectory;
   scene.add(line);
 
+  let guideLine = null;
+  let guideMaterial = null;
+  const fullPathOpacity = Number(theme.trajectory?.full_path_opacity ?? 0);
+  if (fullPathOpacity > 0) {
+    const guideGeometry = new LineGeometry();
+    guideGeometry.setPositions(positions);
+    const gm = new LineMaterial({color, linewidth: lineWidth, transparent: true, worldUnits: false});
+    gm.opacity = fullPathOpacity;
+    gm.resolution.set(renderer.domElement.clientWidth, renderer.domElement.clientHeight);
+    guideMaterial = gm;
+    guideLine = new Line2(guideGeometry, gm);
+    guideLine.computeLineDistances();
+    guideLine.visible = true;
+    scene.add(guideLine);
+  }
+
   state.trajectoryLine = line;
   state.trajectoryMaterial = material;
+  state.trajectoryGuideLine = guideLine;
+  state.trajectoryGuideMaterial = guideMaterial;
   state.trajectory = play.points;
   const lastPoint = play.points.at(-1);
   const lastTime = lastPoint != null ? Number(lastPoint.t) : null;
@@ -597,10 +751,9 @@ function setupTrajectory(play) {
   state.showTrajectory = false;
   if (ball) ball.visible = false;
   if (state.trajectoryLine) state.trajectoryLine.visible = false;
-  const totalSegments = Math.max(0, play.points.length - 1);
   state.progress = {
     geometry,
-    totalSegments,
+    pointCount: play.points.length,
     lastDrawCount: -1,
     lastIndex: -1,
   };
@@ -634,7 +787,10 @@ function updateBallPosition(time) {
   const idx = timeToIndex(points, time);
   const p = points[idx] || points[0];
   state.currentPointIndex = idx;
-  tmpVecB.set(p.x ?? 0, p.y ?? 0, p.z ?? 0);
+  const px = Number(p.x);
+  const py = Number(p.y);
+  const pz = Number(p.z);
+  tmpVecB.set(Number.isFinite(px) ? px : 0, Number.isFinite(py) ? py : 0, Number.isFinite(pz) ? pz : 0);
   applyApproachAdjustments(tmpVecB);
   ball.position.copy(tmpVecB);
   if (state.followBall) controls.target.copy(ball.position);
@@ -648,6 +804,13 @@ function clearTrajectory() {
     state.trajectoryLine = null;
     state.trajectoryMaterial = null;
   }
+  if (state.trajectoryGuideLine) {
+    scene.remove(state.trajectoryGuideLine);
+    state.trajectoryGuideLine.geometry?.dispose?.();
+    state.trajectoryGuideMaterial?.dispose?.();
+    state.trajectoryGuideLine = null;
+    state.trajectoryGuideMaterial = null;
+  }
   state.progress = null;
   state.trajectory = null;
   state.showTrajectory = false;
@@ -655,8 +818,8 @@ function clearTrajectory() {
   if (ball) ball.visible = false;
 }
 
-function getTrailSegments() {
-  const raw = theme?.animation?.trail_segments;
+function getLineDelaySegments() {
+  const raw = theme?.animation?.line_delay_segments;
   if (!Number.isFinite(raw)) return 0;
   return Math.max(0, Math.floor(raw));
 }
@@ -665,8 +828,8 @@ function updateTrajectoryProgress(time) {
   const progress = state.progress;
   const points = state.trajectory;
   if (!progress || !points) return;
-  const totalSegments = progress.totalSegments;
-  if (totalSegments <= 0) {
+  const pointCount = progress.pointCount || points.length;
+  if (!Number.isFinite(pointCount) || pointCount < 2) {
     progress.geometry.setDrawRange(0, 0);
     progress.lastDrawCount = 0;
     if (state.trajectoryLine) state.trajectoryLine.visible = false;
@@ -678,22 +841,28 @@ function updateTrajectoryProgress(time) {
     if (state.trajectoryLine) state.trajectoryLine.visible = false;
     return;
   }
-  let idx = typeof state.currentPointIndex === 'number' ? state.currentPointIndex : 0;
+  let idx = timeToIndex(points, time);
   if (!Number.isFinite(idx)) idx = 0;
-  if (idx < 0 || idx >= points.length) {
-    idx = timeToIndex(points, time);
+  if (idx < 0) idx = 0;
+  if (idx >= points.length) idx = points.length - 1;
+  state.currentPointIndex = idx;
+  const delay = getLineDelaySegments();
+  const rawVisible = Math.min(pointCount, idx + 1 - delay);
+  let drawCount;
+  if (rawVisible <= 0) {
+    drawCount = Math.min(pointCount, pointCount >= 2 ? 2 : 0);
+  } else {
+    drawCount = Math.max(2, rawVisible);
   }
-  const trailing = getTrailSegments();
-  const visibleSegments = Math.max(0, Math.min(totalSegments, idx - trailing));
-  const drawCount = visibleSegments > 0 ? Math.max(1, visibleSegments) : 0;
-  if (progress.lastDrawCount === drawCount) {
-    if (state.trajectoryLine) state.trajectoryLine.visible = drawCount > 0;
+  drawCount = Math.min(pointCount, Math.max(0, Math.floor(drawCount)));
+  if (progress.lastDrawCount === drawCount && progress.lastIndex === idx) {
+    if (state.trajectoryLine) state.trajectoryLine.visible = state.showTrajectory && drawCount >= 2;
     return;
   }
   progress.geometry.setDrawRange(0, drawCount);
   progress.lastDrawCount = drawCount;
   progress.lastIndex = idx;
-  if (state.trajectoryLine) state.trajectoryLine.visible = drawCount > 0;
+  if (state.trajectoryLine) state.trajectoryLine.visible = state.showTrajectory && drawCount >= 2;
 }
 
 function resetBallAppearance() {

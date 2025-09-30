@@ -13,10 +13,12 @@
     "color": "#2563EB",
     "line_width": 3.0,
     "ball_color": "#2563EB",
-    "ball_radius": 0.6
+    "ball_radius": 0.6,
+    "full_path_opacity": 0.0
   },
   "animation": {
-    "trail_segments": 0
+    "trail_segments": 0,
+    "line_delay_segments": 0
   },
   "overlay": {
     "text_color": "#333333"
