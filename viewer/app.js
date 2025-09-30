@@ -8,6 +8,7 @@ import {loadPlaysFromCsv} from './physics-lite.js';
 
 const DEFAULT_TRAJECTORY_COLOR = '#DC2626';
 const DEFAULT_TRAJECTORY_BALL_COLOR = '#DC2626';
+const DEFAULT_TRAJECTORY_BASE_COLOR = '#ffffff';
 const DEFAULT_TRAJECTORY_LINE_WIDTH = 6;
 const DEFAULT_TRAJECTORY_ALWAYS_ON_TOP = true;
 const DEFAULT_ANIMATION_DURATION_SECONDS = 1.5;
@@ -48,9 +49,14 @@ const state = {
   trajectoryLine: null,
   trajectoryColorAttrStart: null,
   trajectoryColorAttrEnd: null,
+  revealColorBuffer: null,
+  revealColorBase: null,
+  revealColorStride: 0,
+  revealColorOffsetStart: 0,
+  revealColorOffsetEnd: 0,
   revealPaintColor: null,
   revealBackgroundColor: null,
-  revealLastPaintedVertex: 0,
+  revealLastPaintedSegment: 0,
   trajectoryBaseMaterial: null,
   trajectoryBaseLine: null,
   trajectoryBall: null,
@@ -64,6 +70,12 @@ const state = {
   trajectoryPoints: [],
   trajectoryTimes: [],
   trajectoryPositions: null,
+  trajectorySegmentBuffer: null,
+  trajectorySegmentBase: null,
+  trajectorySegmentStride: 0,
+  trajectorySegmentOffsetStart: 0,
+  trajectorySegmentOffsetEnd: 0,
+  trajectorySegmentCount: 0,
   animationMode: DEFAULT_ANIMATION_MODE,
   cameraMode: 'infield',
   lastPresetByMode: {infield: 'catcher', outfield: 'cf_stand'},
@@ -134,6 +146,35 @@ function clonePreset(preset, fallback) {
 function toFiniteNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
+}
+
+function getAttributeInfo(attribute) {
+  if (!attribute) return null;
+  if (attribute.isInterleavedBufferAttribute) {
+    const buffer = attribute.data;
+    if (!buffer?.array) return null;
+    return {
+      array: buffer.array,
+      stride: buffer.stride || attribute.itemSize || 0,
+      offset: attribute.offset || 0,
+      buffer,
+    };
+  }
+  if (attribute.array) {
+    return {
+      array: attribute.array,
+      stride: attribute.itemSize || 0,
+      offset: 0,
+      buffer: attribute,
+    };
+  }
+  return null;
+}
+
+function cloneArrayLike(array) {
+  if (!array) return null;
+  if (typeof array.slice === 'function') return array.slice();
+  return Float32Array.from(array);
 }
 
 function isTrajectoryData(value) {
@@ -1071,7 +1112,8 @@ function setupTrajectory(play) {
   const lineWidth = Number.isFinite(parsedLineWidth) && parsedLineWidth > 0 ? parsedLineWidth : DEFAULT_TRAJECTORY_LINE_WIDTH;
   const revealColor = new THREE.Color(theme?.trajectory?.color || DEFAULT_TRAJECTORY_COLOR);
   const ballColor = new THREE.Color(theme?.trajectory?.ball_color || theme?.trajectory?.color || DEFAULT_TRAJECTORY_BALL_COLOR);
-  const backgroundColor = new THREE.Color(theme.background || '#ffffff');
+  const baseTrackColor = new THREE.Color(theme?.trajectory?.base_color || DEFAULT_TRAJECTORY_BASE_COLOR);
+  const backgroundColor = new THREE.Color(theme.background || DEFAULT_TRAJECTORY_BASE_COLOR);
   const alwaysOnTop = (typeof theme?.trajectory?.always_on_top === 'boolean')
     ? theme.trajectory.always_on_top
     : DEFAULT_TRAJECTORY_ALWAYS_ON_TOP;
@@ -1126,9 +1168,13 @@ function setupTrajectory(play) {
   const baseGeometry = new LineGeometry();
   baseGeometry.setPositions(basePositions);
   baseGeometry.setDrawRange(0, Math.max(points.length, 0));
-  const baseMaterial = new LineMaterial({color: backgroundColor, linewidth: lineWidth, transparent: false, worldUnits: false});
+  const baseMaterial = new LineMaterial({color: baseTrackColor, linewidth: lineWidth, transparent: false, worldUnits: false});
   baseMaterial.opacity = 1;
   baseMaterial.resolution.set(renderer.domElement.clientWidth, renderer.domElement.clientHeight);
+  if (alwaysOnTop) {
+    baseMaterial.depthTest = false;
+    baseMaterial.depthWrite = false;
+  }
   const baseLine = new Line2(baseGeometry, baseMaterial);
   baseLine.renderOrder = 0;
   baseLine.visible = points.length >= 2;
@@ -1158,12 +1204,25 @@ function setupTrajectory(play) {
   state.trajectoryColorAttrEnd = revealGeometry.attributes?.instanceColorEnd || null;
   state.revealPaintColor = revealColor;
   state.revealBackgroundColor = backgroundColor;
-  state.revealLastPaintedVertex = 0;
+  const colorInfo = getAttributeInfo(state.trajectoryColorAttrStart);
+  state.revealColorBuffer = colorInfo?.buffer || null;
+  state.revealColorBase = colorInfo?.array ? cloneArrayLike(colorInfo.array) : null;
+  state.revealColorStride = colorInfo?.stride || 0;
+  state.revealColorOffsetStart = colorInfo?.offset || 0;
+  state.revealColorOffsetEnd = getAttributeInfo(state.trajectoryColorAttrEnd)?.offset ?? (state.revealColorStride >= 6 ? 3 : 0);
+  state.revealLastPaintedSegment = 0;
   state.trajectoryBaseLine = baseLine;
   state.trajectoryBaseMaterial = baseMaterial;
   state.trajectoryBall = ball;
   state.trajectoryPoints = points;
   state.trajectoryPositions = basePositions;
+  const segmentInfo = getAttributeInfo(revealGeometry.attributes?.instanceStart);
+  state.trajectorySegmentBuffer = segmentInfo?.buffer || null;
+  state.trajectorySegmentBase = segmentInfo?.array ? cloneArrayLike(segmentInfo.array) : null;
+  state.trajectorySegmentStride = segmentInfo?.stride || 0;
+  state.trajectorySegmentOffsetStart = segmentInfo?.offset || 0;
+  state.trajectorySegmentOffsetEnd = getAttributeInfo(revealGeometry.attributes?.instanceEnd)?.offset ?? 0;
+  state.trajectorySegmentCount = revealGeometry.attributes?.instanceStart?.count || Math.max(points.length - 1, 0);
   state.trajectoryTimes = times;
   state.duration = duration;
   state.elapsed = 0;
@@ -1217,7 +1276,18 @@ function clearTrajectory() {
   state.trajectoryPoints = [];
   state.trajectoryTimes = [];
   state.trajectoryPositions = null;
-  state.revealLastPaintedVertex = 0;
+  state.revealLastPaintedSegment = 0;
+  state.revealColorBuffer = null;
+  state.revealColorBase = null;
+  state.revealColorStride = 0;
+  state.revealColorOffsetStart = 0;
+  state.revealColorOffsetEnd = 0;
+  state.trajectorySegmentBuffer = null;
+  state.trajectorySegmentBase = null;
+  state.trajectorySegmentStride = 0;
+  state.trajectorySegmentOffsetStart = 0;
+  state.trajectorySegmentOffsetEnd = 0;
+  state.trajectorySegmentCount = 0;
   state.animationMode = getAnimationMode();
   state.duration = 0;
   state.elapsed = 0;
@@ -1254,31 +1324,22 @@ function resetRevealProgress() {
     attr.array.set(state.trajectoryPositions);
     attr.needsUpdate = true;
   }
-  const colorStart = state.trajectoryColorAttrStart;
-  const colorEnd = state.trajectoryColorAttrEnd;
-  const background = state.revealBackgroundColor;
-  if (background && colorStart?.array) {
-    const arr = colorStart.array;
-    for (let i = 0; i < arr.length; i += 3) {
-      arr[i] = background.r;
-      arr[i + 1] = background.g;
-      arr[i + 2] = background.b;
-    }
-    colorStart.needsUpdate = true;
+  const segmentBuffer = state.trajectorySegmentBuffer;
+  const baseSegmentArray = state.trajectorySegmentBase;
+  if (segmentBuffer?.array && baseSegmentArray && segmentBuffer.array.length === baseSegmentArray.length) {
+    segmentBuffer.array.set(baseSegmentArray);
+    segmentBuffer.needsUpdate = true;
   }
-  if (background && colorEnd?.array) {
-    const arr = colorEnd.array;
-    for (let i = 0; i < arr.length; i += 3) {
-      arr[i] = background.r;
-      arr[i + 1] = background.g;
-      arr[i + 2] = background.b;
-    }
-    colorEnd.needsUpdate = true;
+  const colorBuffer = state.revealColorBuffer;
+  const colorBase = state.revealColorBase;
+  if (colorBuffer?.array && colorBase && colorBuffer.array.length === colorBase.length) {
+    colorBuffer.array.set(colorBase);
+    colorBuffer.needsUpdate = true;
   }
   const positionArray = attr?.array;
   const vertexCount = positionArray ? positionArray.length / 3 : 0;
   geometry.setDrawRange(0, 0);
-  state.revealLastPaintedVertex = 0;
+  state.revealLastPaintedSegment = 0;
   state.visiblePoints = 0;
   state.currentPointIndex = 0;
   state.currentSegmentAlpha = 0;
@@ -1302,23 +1363,20 @@ function applyRevealProgress(segmentIndex, alpha) {
   if (!Array.isArray(points)) return;
   const vertexCount = points.length;
   const geometry = state.trajectoryLine.geometry;
-  const attr = geometry?.attributes?.position;
   const base = state.trajectoryPositions;
-  if (!attr?.array || !base) return;
-  const arr = attr.array;
-  if (arr.length === base.length) {
-    arr.set(base);
-  } else {
-    const len = Math.min(arr.length, base.length);
-    for (let i = 0; i < len; i++) arr[i] = base[i];
-  }
-  if (vertexCount <= 1) {
+  if (!base) return;
+  const segmentBuffer = state.trajectorySegmentBuffer;
+  const baseSegments = state.trajectorySegmentBase;
+  const segmentStride = state.trajectorySegmentStride || 0;
+  const segmentOffsetEnd = state.trajectorySegmentOffsetEnd || 0;
+  const segmentCount = state.trajectorySegmentCount || Math.max(vertexCount - 1, 0);
+  if (vertexCount <= 1 || segmentCount <= 0) {
     const visible = vertexCount > 0 ? 1 : 0;
-    geometry.setDrawRange(0, visible);
+    geometry.setDrawRange(0, 0);
     state.visiblePoints = visible;
     state.currentPointIndex = visible ? 0 : -1;
     state.currentSegmentAlpha = visible > 0 ? 1 : 0;
-    updateRevealColors(visible);
+    updateRevealColors(0);
     state.trajectoryLine.visible = visible > 0;
     if (visible > 0) {
       lineTip.set(base[0], base[1], base[2]);
@@ -1327,71 +1385,70 @@ function applyRevealProgress(segmentIndex, alpha) {
         setBallVisibility(true);
       }
     }
-    attr.needsUpdate = true;
     return;
   }
-  const clampedSegment = Math.max(0, Math.min(segmentIndex, vertexCount - 2));
+  const clampedSegment = Math.max(0, Math.min(segmentIndex, segmentCount - 1));
   const nextIndex = clampedSegment + 1;
   const clampedAlpha = Math.max(0, Math.min(1, alpha));
   const tip = interpolateSegment(base, clampedSegment, nextIndex, clampedAlpha, lineTip);
-  const tipOffset = nextIndex * 3;
-  arr[tipOffset] = tip.x;
-  arr[tipOffset + 1] = tip.y;
-  arr[tipOffset + 2] = tip.z;
-  attr.needsUpdate = true;
-  const paintedVertexCount = Math.min(vertexCount, Math.max(0, nextIndex + 1));
-  const drawCount = Math.max(0, Math.min(vertexCount, paintedVertexCount));
-  geometry.setDrawRange(0, drawCount);
-  state.visiblePoints = drawCount;
-  state.currentPointIndex = nextIndex;
+  if (segmentBuffer?.array && baseSegments && segmentStride > 0 && segmentBuffer.array.length === baseSegments.length) {
+    segmentBuffer.array.set(baseSegments);
+    const tipOffset = clampedSegment * segmentStride + segmentOffsetEnd;
+    segmentBuffer.array[tipOffset] = tip.x;
+    segmentBuffer.array[tipOffset + 1] = tip.y;
+    segmentBuffer.array[tipOffset + 2] = tip.z;
+    segmentBuffer.needsUpdate = true;
+  }
+  const drawSegments = Math.max(0, Math.min(segmentCount, clampedSegment + 1));
+  geometry.setDrawRange(0, drawSegments);
+  state.visiblePoints = drawSegments + (clampedAlpha > 0 ? 1 : 0);
+  state.currentPointIndex = Math.min(vertexCount - 1, nextIndex);
   state.currentSegmentAlpha = clampedAlpha;
-  updateRevealColors(drawCount);
-  state.trajectoryLine.visible = drawCount >= 2 || clampedAlpha > 0;
+  const paintedSegments = Math.max(0, Math.min(segmentCount, clampedSegment + (clampedAlpha > 0 ? 1 : 0)));
+  updateRevealColors(paintedSegments);
+  state.trajectoryLine.visible = drawSegments > 0 || clampedAlpha > 0;
   if (state.trajectoryBall) {
     state.trajectoryBall.position.copy(lineTip);
     setBallVisibility(true);
   }
 }
 
-function updateRevealColors(paintedVertexCount) {
-  const colorStart = state.trajectoryColorAttrStart;
-  const colorEnd = state.trajectoryColorAttrEnd;
+function updateRevealColors(paintedSegmentCount) {
   const paint = state.revealPaintColor;
   const background = state.revealBackgroundColor;
-  if (!paint || !background) return;
-  if (!colorStart?.array) return;
-  const arrStart = colorStart.array;
-  const arrEnd = colorEnd?.array || null;
-  const vertexCount = arrStart.length / 3;
-  const target = Math.max(0, Math.min(vertexCount, Math.floor(paintedVertexCount)));
-  const current = Math.max(0, Math.min(vertexCount, state.revealLastPaintedVertex || 0));
+  const buffer = state.revealColorBuffer;
+  if (!paint || !background || !buffer?.array) return;
+  const stride = state.revealColorStride || 0;
+  if (!(stride > 0)) return;
+  const totalSegments = state.trajectorySegmentCount || 0;
+  if (!(totalSegments > 0)) return;
+  const target = Math.max(0, Math.min(totalSegments, Math.floor(paintedSegmentCount)));
+  const current = Math.max(0, Math.min(totalSegments, state.revealLastPaintedSegment || 0));
   if (target === current) return;
-  const paintR = paint.r;
-  const paintG = paint.g;
-  const paintB = paint.b;
-  const bgR = background.r;
-  const bgG = background.g;
-  const bgB = background.b;
-  const start = Math.min(current, target);
-  const end = Math.max(current, target);
   const usePaint = target > current;
-  const rVal = usePaint ? paintR : bgR;
-  const gVal = usePaint ? paintG : bgG;
-  const bVal = usePaint ? paintB : bgB;
-  for (let i = start; i < end; i++) {
-    const offset = i * 3;
-    arrStart[offset] = rVal;
-    arrStart[offset + 1] = gVal;
-    arrStart[offset + 2] = bVal;
-    if (arrEnd) {
-      arrEnd[offset] = rVal;
-      arrEnd[offset + 1] = gVal;
-      arrEnd[offset + 2] = bVal;
+  const color = usePaint ? paint : background;
+  const rVal = color.r;
+  const gVal = color.g;
+  const bVal = color.b;
+  const startIndex = Math.min(current, target);
+  const endIndex = Math.max(current, target);
+  const offsetStart = state.revealColorOffsetStart || 0;
+  const offsetEnd = state.revealColorOffsetEnd ?? offsetStart;
+  const arr = buffer.array;
+  for (let segment = startIndex; segment < endIndex; segment++) {
+    const baseOffset = segment * stride + offsetStart;
+    arr[baseOffset] = rVal;
+    arr[baseOffset + 1] = gVal;
+    arr[baseOffset + 2] = bVal;
+    if (offsetEnd !== offsetStart) {
+      const endOffset = segment * stride + offsetEnd;
+      arr[endOffset] = rVal;
+      arr[endOffset + 1] = gVal;
+      arr[endOffset + 2] = bVal;
     }
   }
-  state.revealLastPaintedVertex = target;
-  colorStart.needsUpdate = true;
-  if (colorEnd) colorEnd.needsUpdate = true;
+  buffer.needsUpdate = true;
+  state.revealLastPaintedSegment = target;
 }
 
 function restartCurrentPlay() {
