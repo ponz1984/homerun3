@@ -11,12 +11,12 @@
   },
   "trajectory": {
     "color": "#2563EB",
-    "line_width": 3.0
+    "line_width": 3.0,
+    "ball_radius": 1.2
   },
   "animation": {
-    "mode": "line_only",
-    "duration_seconds": 4.0,
-    "ft_per_sec": 140.0,
+    "mode": "reveal_with_ball",
+    "duration_seconds": 1.5,
     "ease": "linear"
   },
   "overlay": {
