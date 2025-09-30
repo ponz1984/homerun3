@@ -1277,7 +1277,7 @@ function resetRevealProgress() {
   }
   const positionArray = attr?.array;
   const vertexCount = positionArray ? positionArray.length / 3 : 0;
-  geometry.setDrawRange(0, vertexCount);
+  geometry.setDrawRange(0, 0);
   state.revealLastPaintedVertex = 0;
   state.visiblePoints = 0;
   state.currentPointIndex = 0;
@@ -1339,13 +1339,14 @@ function applyRevealProgress(segmentIndex, alpha) {
   arr[tipOffset + 1] = tip.y;
   arr[tipOffset + 2] = tip.z;
   attr.needsUpdate = true;
-  geometry.setDrawRange(0, vertexCount);
   const paintedVertexCount = Math.min(vertexCount, Math.max(0, nextIndex + 1));
-  state.visiblePoints = paintedVertexCount;
+  const drawCount = Math.max(0, Math.min(vertexCount, paintedVertexCount));
+  geometry.setDrawRange(0, drawCount);
+  state.visiblePoints = drawCount;
   state.currentPointIndex = nextIndex;
   state.currentSegmentAlpha = clampedAlpha;
-  updateRevealColors(paintedVertexCount);
-  state.trajectoryLine.visible = paintedVertexCount >= 2 || clampedAlpha > 0;
+  updateRevealColors(drawCount);
+  state.trajectoryLine.visible = drawCount >= 2 || clampedAlpha > 0;
   if (state.trajectoryBall) {
     state.trajectoryBall.position.copy(lineTip);
     setBallVisibility(true);
