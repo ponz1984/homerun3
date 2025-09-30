@@ -38,7 +38,7 @@ const state = {
   trajectoryLine: null,
   duration: 0,
   time: 0,
-  segmentIndex: 0,
+  currentPointIndex: 0,
   progress: null,
   cameraMode: 'infield',
   lastPresetByMode: {infield: 'catcher', outfield: 'cf_stand'},
@@ -75,9 +75,9 @@ const BASE_INFIELD_PRESETS = {
 const BASE_OUTFIELD_PRESETS = {
   catcher: {pos: [0, 360, 90], lookAt: [0, 0, 6]},
   if_high: {pos: [0, 460, 140], lookAt: [0, 0, 6]},
-  lf_stand: {pos: [-260, 380, 90], lookAt: [0, 0, 6]},
-  cf_stand: {pos: [0, 460, 130], lookAt: [0, 0, 6]},
-  rf_stand: {pos: [260, 380, 90], lookAt: [0, 0, 6]},
+  lf_stand: {pos: [-260, 520, 140], lookAt: [0, 0, 6]},
+  cf_stand: {pos: [0, 600, 180], lookAt: [0, 0, 6]},
+  rf_stand: {pos: [260, 520, 140], lookAt: [0, 0, 6]},
 };
 
 const ORIGIN_LOOK_AT = [0, 0, 6];
@@ -148,9 +148,11 @@ function buildCameraPresets(raw, baseGroups = {}) {
 
 function deriveOutfieldApproachPresets(ballpark) {
   const presets = mergePresetGroup(BASE_OUTFIELD_PRESETS, null);
-  const source = (ballpark && Array.isArray(ballpark.fence_base) && ballpark.fence_base.length)
-    ? ballpark.fence_base
-    : (ballpark && Array.isArray(ballpark.outline) && ballpark.outline.length ? ballpark.outline : null);
+  const source = (ballpark && Array.isArray(ballpark.fence_top) && ballpark.fence_top.length)
+    ? ballpark.fence_top
+    : (ballpark && Array.isArray(ballpark.fence_base) && ballpark.fence_base.length)
+      ? ballpark.fence_base
+      : (ballpark && Array.isArray(ballpark.outline) && ballpark.outline.length ? ballpark.outline : null);
   if (!source) return presets;
 
   const points = source
@@ -200,9 +202,9 @@ function deriveOutfieldApproachPresets(ballpark) {
     rf_stand: [[40, 80], [30, 100]],
   };
   const standConfigs = {
-    lf_stand: {distance: 90, height: 100},
-    cf_stand: {distance: 110, height: 130},
-    rf_stand: {distance: 90, height: 100},
+    lf_stand: {distance: 130, height: 150},
+    cf_stand: {distance: 160, height: 180},
+    rf_stand: {distance: 130, height: 150},
   };
 
   for (const [stand, searchRanges] of Object.entries(ranges)) {
@@ -213,14 +215,15 @@ function deriveOutfieldApproachPresets(ballpark) {
     }
     if (!candidate) candidate = selectFallback();
     if (!candidate) continue;
-    const cfg = standConfigs[stand] || {distance: 90, height: 100};
+    const cfg = standConfigs[stand] || {distance: 130, height: 150};
     tmpVecA.set(candidate.x, candidate.y, 0);
     const radius = tmpVecA.length();
     if (radius === 0) continue;
-    tmpVecA.normalize().multiplyScalar(cfg.distance);
+    tmpVecA.normalize();
+    tmpVecB.copy(tmpVecA).multiplyScalar(cfg.distance);
     const pos = [
-      candidate.x + tmpVecA.x,
-      candidate.y + tmpVecA.y,
+      candidate.x + tmpVecB.x,
+      candidate.y + tmpVecB.y,
       (candidate.z || 0) + cfg.height,
     ];
     presets[stand] = {pos, lookAt: [...ORIGIN_LOOK_AT]};
@@ -308,32 +311,85 @@ function normalizePlay(p) {
 // 軌道JSONを [{t,x,y,z}, …] に正規化
 function normalizeTrajectory(traj) {
   if (!traj) return [];
+  let points = [];
   // {points: [{t,x,y,z}, ...]}
   if (Array.isArray(traj.points)) {
-    return traj.points.map(p => ({t:p.t??0, x:p.x, y:p.y, z:p.z??0}));
+    points = traj.points.map((p, idx) => {
+      const t = Number(p?.t);
+      return {
+        t: Number.isFinite(t) ? t : idx / 60,
+        x: p?.x,
+        y: p?.y,
+        z: p?.z ?? 0,
+      };
+    });
+    return ensureMonotonicTimes(points);
   }
   // {samples: [[t,x,y,z], ...]}
   if (Array.isArray(traj.samples)) {
-    return traj.samples.map(([t,x,y,z]) => ({t:t??0, x, y, z:z??0}));
+    points = traj.samples.map(([t, x, y, z], idx) => ({
+      t: Number.isFinite(t) ? Number(t) : idx / 60,
+      x,
+      y,
+      z: z ?? 0,
+    }));
+    return ensureMonotonicTimes(points);
   }
   // {t:[], x:[], y:[], z:[]}
   if (Array.isArray(traj.t) && Array.isArray(traj.x) && Array.isArray(traj.y) && Array.isArray(traj.z)) {
     const n = Math.min(traj.t.length, traj.x.length, traj.y.length, traj.z.length);
-    const out = [];
-    for (let i=0;i<n;i++) out.push({t:traj.t[i]??0, x:traj.x[i], y:traj.y[i], z:traj.z[i]??0});
-    return out;
+    points = [];
+    for (let i = 0; i < n; i++) {
+      const t = Number(traj.t[i]);
+      points.push({
+        t: Number.isFinite(t) ? t : i / 60,
+        x: traj.x[i],
+        y: traj.y[i],
+        z: traj.z[i] ?? 0,
+      });
+    }
+    return ensureMonotonicTimes(points);
   }
   // [[x,y,z]] or [[t,x,y,z]]
   if (Array.isArray(traj) && Array.isArray(traj[0])) {
-    return traj.map(a => (a.length===4 ? ({t:a[0]??0, x:a[1], y:a[2], z:a[3]??0})
-                                     : ({t:0, x:a[0], y:a[1], z:a[2]??0})));
+    points = traj.map((a, idx) => (a.length === 4
+      ? ({t: Number.isFinite(a[0]) ? Number(a[0]) : idx / 60, x: a[1], y: a[2], z: a[3] ?? 0})
+      : ({t: idx / 60, x: a[0], y: a[1], z: a[2] ?? 0})));
+    return ensureMonotonicTimes(points);
   }
   // ★ 配列の中がオブジェクト [{x:..,y:..,z:..,t?}, ...] に対応
   if (Array.isArray(traj) && typeof traj[0] === 'object' && traj[0] !== null && 'x' in traj[0] && 'y' in traj[0]) {
-    return traj.map(p => ({t:('t' in p ? p.t : 0), x:p.x, y:p.y, z:('z' in p ? p.z : 0)}));
+    points = traj.map((p, idx) => {
+      const t = 't' in p ? Number(p.t) : idx / 60;
+      return {
+        t: Number.isFinite(t) ? t : idx / 60,
+        x: p.x,
+        y: p.y,
+        z: ('z' in p ? p.z : 0),
+      };
+    });
+    return ensureMonotonicTimes(points);
   }
   console.warn('Unknown trajectory shape:', traj);
   return [];
+}
+
+function ensureMonotonicTimes(points) {
+  if (!Array.isArray(points) || points.length === 0) return [];
+  const fallbackStep = 1 / 60;
+  let last = Number(points[0].t);
+  if (!Number.isFinite(last)) {
+    last = 0;
+  }
+  points[0].t = last;
+  for (let i = 1; i < points.length; i++) {
+    let t = Number(points[i].t);
+    if (!Number.isFinite(t)) t = last + fallbackStep;
+    if (t <= last) t = last + fallbackStep;
+    points[i].t = t;
+    last = t;
+  }
+  return points;
 }
 
 // ---------- data load ----------
@@ -371,12 +427,18 @@ function setupScene(ballpark) {
   renderer.setClearColor(theme.background || '#f5f7fb');
 
   camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
+  camera.up.set(0, 0, 1);
   scene = new THREE.Scene();
 
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   controls.target.set(0, 180, 6);
+  controls.minPolarAngle = THREE.MathUtils.degToRad(10);
+  controls.maxPolarAngle = THREE.MathUtils.degToRad(88);
+  controls.minDistance = 60;
+  controls.maxDistance = 2500;
+  controls.update();
 
   const ballColor = theme.trajectory?.ball_color || theme.trajectory?.color || DEFAULT_BALL_COLOR;
   const ballRadius = theme.trajectory?.ball_radius ?? 1.5;
@@ -532,7 +594,6 @@ function setupTrajectory(play) {
   const lastTime = lastPoint != null ? Number(lastPoint.t) : null;
   state.duration = Number.isFinite(lastTime) ? lastTime : (play.points.length / 60);
   state.time = 0;
-  state.segmentIndex = 0;
   state.showTrajectory = false;
   if (ball) ball.visible = false;
   if (state.trajectoryLine) state.trajectoryLine.visible = false;
@@ -540,33 +601,40 @@ function setupTrajectory(play) {
   state.progress = {
     geometry,
     totalSegments,
-    lastSegments: -1,
+    lastDrawCount: -1,
+    lastIndex: -1,
   };
 
+  state.currentPointIndex = 0;
   updateBallPosition(0);
   updateTrajectoryProgress(0);
   clock?.stop();
 }
 
-function sampleTrajectory(points, t) {
-  if (!points.length) return {x:0,y:0,z:0};
-  const t0 = points[0].t ?? 0, tn = points.at(-1).t ?? 0;
-  if (t <= t0) return {x:points[0].x, y:points[0].y, z:points[0].z};
-  if (t >= tn) { const p = points.at(-1); return {x:p.x, y:p.y, z:p.z}; }
-  let idx = state.segmentIndex;
-  while (idx < points.length - 2 && (points[idx + 1].t ?? 0) < t) idx++;
-  while (idx > 0 && (points[idx].t ?? 0) > t) idx--;
-  state.segmentIndex = idx;
-  const p0 = points[idx], p1 = points[idx + 1];
-  const span = (p1.t ?? 0) - (p0.t ?? 0) || 1e-6;
-  const a = (t - (p0.t ?? 0)) / span;
-  return { x: p0.x + (p1.x - p0.x) * a, y: p0.y + (p1.y - p0.y) * a, z: p0.z + (p1.z - p0.z) * a };
+function timeToIndex(points, time) {
+  if (!Array.isArray(points) || points.length === 0) return 0;
+  const n = points.length;
+  if (!Number.isFinite(time) || time <= (points[0].t ?? 0)) return 0;
+  const lastTime = points[n - 1].t ?? 0;
+  if (time >= lastTime) return n - 1;
+  let lo = 0;
+  let hi = n - 1;
+  while (lo + 1 < hi) {
+    const mid = (lo + hi) >> 1;
+    const mt = points[mid].t ?? 0;
+    if (time >= mt) lo = mid;
+    else hi = mid;
+  }
+  return lo;
 }
 
 function updateBallPosition(time) {
   if (!state.trajectory || !ball) return;
-  const p = sampleTrajectory(state.trajectory, time);
-  tmpVecB.set(p.x, p.y, p.z);
+  const points = state.trajectory;
+  const idx = timeToIndex(points, time);
+  const p = points[idx] || points[0];
+  state.currentPointIndex = idx;
+  tmpVecB.set(p.x ?? 0, p.y ?? 0, p.z ?? 0);
   applyApproachAdjustments(tmpVecB);
   ball.position.copy(tmpVecB);
   if (state.followBall) controls.target.copy(ball.position);
@@ -583,37 +651,49 @@ function clearTrajectory() {
   state.progress = null;
   state.trajectory = null;
   state.showTrajectory = false;
+  state.currentPointIndex = 0;
   if (ball) ball.visible = false;
+}
+
+function getTrailSegments() {
+  const raw = theme?.animation?.trail_segments;
+  if (!Number.isFinite(raw)) return 0;
+  return Math.max(0, Math.floor(raw));
 }
 
 function updateTrajectoryProgress(time) {
   const progress = state.progress;
-  if (!progress || !state.trajectory) return;
+  const points = state.trajectory;
+  if (!progress || !points) return;
   const totalSegments = progress.totalSegments;
   if (totalSegments <= 0) {
     progress.geometry.setDrawRange(0, 0);
-    progress.lastSegments = 0;
+    progress.lastDrawCount = 0;
     if (state.trajectoryLine) state.trajectoryLine.visible = false;
     return;
   }
   if (!state.showTrajectory) {
     progress.geometry.setDrawRange(0, 0);
-    progress.lastSegments = -1;
+    progress.lastDrawCount = 0;
     if (state.trajectoryLine) state.trajectoryLine.visible = false;
     return;
   }
-  const duration = state.duration || (state.trajectory.length / 60) || 1;
-  const clamped = duration > 0 ? Math.min(Math.max(time, 0), duration) : time;
-  let visibleSegments = duration > 0 ? Math.floor((clamped / duration) * totalSegments) : totalSegments;
-  if (clamped >= duration) visibleSegments = totalSegments;
-  visibleSegments = Math.max(0, Math.min(totalSegments, visibleSegments));
-  if (progress.lastSegments === visibleSegments) {
-    if (state.trajectoryLine) state.trajectoryLine.visible = state.trajectoryLine.visible || visibleSegments > 0;
+  let idx = typeof state.currentPointIndex === 'number' ? state.currentPointIndex : 0;
+  if (!Number.isFinite(idx)) idx = 0;
+  if (idx < 0 || idx >= points.length) {
+    idx = timeToIndex(points, time);
+  }
+  const trailing = getTrailSegments();
+  const visibleSegments = Math.max(0, Math.min(totalSegments, idx - trailing));
+  const drawCount = visibleSegments > 0 ? Math.max(1, visibleSegments) : 0;
+  if (progress.lastDrawCount === drawCount) {
+    if (state.trajectoryLine) state.trajectoryLine.visible = drawCount > 0;
     return;
   }
-  progress.geometry.setDrawRange(0, visibleSegments);
-  progress.lastSegments = visibleSegments;
-  if (state.trajectoryLine) state.trajectoryLine.visible = visibleSegments > 0;
+  progress.geometry.setDrawRange(0, drawCount);
+  progress.lastDrawCount = drawCount;
+  progress.lastIndex = idx;
+  if (state.trajectoryLine) state.trajectoryLine.visible = drawCount > 0;
 }
 
 function resetBallAppearance() {
@@ -913,7 +993,7 @@ function togglePlay(force) {
   const desired = typeof force === 'boolean' ? force : !state.playing;
   if (desired && state.trajectory && state.time >= state.duration) {
     state.time = 0;
-    state.segmentIndex = 0;
+    state.currentPointIndex = 0;
     updateBallPosition(0);
     updateTrajectoryProgress(0);
   }

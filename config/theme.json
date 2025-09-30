@@ -15,6 +15,9 @@
     "ball_color": "#2563EB",
     "ball_radius": 0.6
   },
+  "animation": {
+    "trail_segments": 0
+  },
   "overlay": {
     "text_color": "#333333"
   }
