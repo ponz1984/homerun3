@@ -10,20 +10,16 @@
     "line_width": 1.0
   },
   "trajectory": {
-    "color": "#2563EB",
-    "ghost_color": "#93C5FD",
-    "line_width": 3.0,
-    "ball_radius": 0.6
+    "color": "#DC2626",
+    "ball_color": "#DC2626",
+    "line_width": 6,
+    "ball_radius": 1.0,
+    "always_on_top": true
   },
   "animation": {
     "mode": "reveal_with_ball",
     "duration_seconds": 1.5,
     "ease": "linear",
-    "ghost": {
-      "enabled": true,
-      "segments": 80,
-      "opacity": 0.35
-    },
     "strict_direction": true
   },
   "overlay": {
