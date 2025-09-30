@@ -5,20 +5,29 @@
       "slug": "lad-dodger-stadium",
       "name": "Dodger Stadium",
       "aliases": ["lad", "dodgers", "dodger-stadium"],
-      "versions": { "2024": "data/ballparks/lad-dodger-stadium/2024.json" }
+      "venue_ids": [22],
+      "versions": {
+        "2024": "data/ballparks/lad-dodger-stadium/2024.json"
+      }
     },
     {
       "slug": "sea-t-mobile-park",
       "name": "T-Mobile Park",
       "aliases": ["sea", "mariners", "tmobile", "safeco"],
-      "versions": { "2024": "data/ballparks/sea-t-mobile-park/2024.json" }
+      "venue_ids": [680],
+      "versions": {
+        "2024": "data/ballparks/sea-t-mobile-park/2024.json"
+      }
     },
     {
       "slug": "chc-wrigley-field",
       "name": "Wrigley Field",
       "aliases": ["chc", "cubs", "wrigley", "wrigley-field"],
-      "versions": { "2024": "data/ballparks/chc-wrigley-field/2024.json" }
+      "versions": {
+        "2024": "data/ballparks/chc-wrigley-field/2024.json"
+      }
     }
   ]
 }
+
 
