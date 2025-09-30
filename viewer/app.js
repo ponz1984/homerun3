@@ -6,6 +6,24 @@ import {LineGeometry} from 'three/addons/lines/LineGeometry.js';
 import {LineMaterial} from 'three/addons/lines/LineMaterial.js';
 import {loadPlaysFromCsv} from './physics-lite.js';
 
+const DEFAULT_TRAJECTORY_COLOR = '#2563EB';
+const DEFAULT_BALL_COLOR = '#2563EB';
+const DEFAULT_APPROACH_CONFIG = {
+  nearBehavior: 'stop',
+  stopDistance: 14,
+  fadeStart: 120,
+  fadeEnd: 16,
+  dollyRetreat: 24,
+};
+const YAW_STEP_DEG = 5;
+const YAW_SPEED_DEG = 45;
+const PAN_STEP = 0.5;
+const PAN_SPEED = 6;
+
+const tmpVecA = new THREE.Vector3();
+const tmpVecB = new THREE.Vector3();
+const tmpVecC = new THREE.Vector3();
+
 const $ = (id) => document.getElementById(id);
 
 const state = {
@@ -26,11 +44,27 @@ const state = {
   lastPresetByMode: {infield: 'catcher', outfield: 'cf_stand'},
   lastPreset: 'catcher',
   statusTimer: null,
+  showTrajectory: false,
+  approachConfig: {...DEFAULT_APPROACH_CONFIG},
+  viewAdjust: {
+    yawDir: 0,
+    panDir: 0,
+    yawSpeed: YAW_SPEED_DEG,
+    panSpeed: PAN_SPEED,
+  },
 };
 
 let renderer, scene, camera, controls, ball, theme, cameraPresets, clock;
+let adjustLastTime = null;
+const activeKeyAdjust = new Set();
+const KEY_ADJUST_BINDINGS = {
+  a: {type: 'yaw', dir: -1},
+  d: {type: 'yaw', dir: 1},
+  j: {type: 'pan', dir: -1},
+  l: {type: 'pan', dir: 1},
+};
 
-const DEFAULT_INFIELD_PRESETS = {
+const BASE_INFIELD_PRESETS = {
   catcher: {pos: [-5, -20, 6], lookAt: [0, 60, 6]},
   if_high: {pos: [0, -120, 55], lookAt: [0, 140, 10]},
   lf_stand: {pos: [-260, 180, 50], lookAt: [0, 200, 10]},
@@ -38,7 +72,7 @@ const DEFAULT_INFIELD_PRESETS = {
   rf_stand: {pos: [260, 180, 50], lookAt: [0, 200, 10]},
 };
 
-const DEFAULT_OUTFIELD_PRESETS = {
+const BASE_OUTFIELD_PRESETS = {
   catcher: {pos: [0, 360, 90], lookAt: [0, 0, 6]},
   if_high: {pos: [0, 460, 140], lookAt: [0, 0, 6]},
   lf_stand: {pos: [-260, 380, 90], lookAt: [0, 0, 6]},
@@ -65,6 +99,22 @@ function clonePreset(preset, fallback) {
   };
 }
 
+function parseApproachConfig(raw) {
+  const config = {...DEFAULT_APPROACH_CONFIG};
+  if (!raw || typeof raw !== 'object') return config;
+  if (typeof raw.nearBehavior === 'string') {
+    const normalized = raw.nearBehavior.toLowerCase();
+    if (['stop', 'dolly', 'fade'].includes(normalized)) {
+      config.nearBehavior = normalized;
+    }
+  }
+  if (Number.isFinite(raw.stopDistance)) config.stopDistance = Number(raw.stopDistance);
+  if (Number.isFinite(raw.fadeStart)) config.fadeStart = Number(raw.fadeStart);
+  if (Number.isFinite(raw.fadeEnd)) config.fadeEnd = Number(raw.fadeEnd);
+  if (Number.isFinite(raw.dollyRetreat)) config.dollyRetreat = Number(raw.dollyRetreat);
+  return config;
+}
+
 function mergePresetGroup(baseGroup, overrideGroup) {
   const merged = {};
   for (const [name, preset] of Object.entries(baseGroup)) {
@@ -79,28 +129,117 @@ function mergePresetGroup(baseGroup, overrideGroup) {
   return merged;
 }
 
-function buildCameraPresets(raw) {
+function buildCameraPresets(raw, baseGroups = {}) {
+  const baseInfield = baseGroups.infield || BASE_INFIELD_PRESETS;
+  const baseOutfield = baseGroups.outfield || BASE_OUTFIELD_PRESETS;
   if (raw && (raw.infield || raw.outfield)) {
     return {
-      infield: mergePresetGroup(DEFAULT_INFIELD_PRESETS, raw.infield),
-      outfield: mergePresetGroup(DEFAULT_OUTFIELD_PRESETS, raw.outfield),
+      infield: mergePresetGroup(baseInfield, raw.infield),
+      outfield: mergePresetGroup(baseOutfield, raw.outfield),
+      __base: {infield: baseInfield, outfield: baseOutfield},
     };
   }
   return {
-    infield: mergePresetGroup(DEFAULT_INFIELD_PRESETS, raw),
-    outfield: mergePresetGroup(DEFAULT_OUTFIELD_PRESETS, {}),
+    infield: mergePresetGroup(baseInfield, raw),
+    outfield: mergePresetGroup(baseOutfield, {}),
+    __base: {infield: baseInfield, outfield: baseOutfield},
   };
+}
+
+function deriveOutfieldApproachPresets(ballpark) {
+  const presets = mergePresetGroup(BASE_OUTFIELD_PRESETS, null);
+  const source = (ballpark && Array.isArray(ballpark.fence_base) && ballpark.fence_base.length)
+    ? ballpark.fence_base
+    : (ballpark && Array.isArray(ballpark.outline) && ballpark.outline.length ? ballpark.outline : null);
+  if (!source) return presets;
+
+  const points = source
+    .map((pt) => {
+      if (Array.isArray(pt)) {
+        return {x: Number(pt[0]) || 0, y: Number(pt[1]) || 0, z: Number(pt[2]) || 0};
+      }
+      if (pt && typeof pt === 'object') {
+        return {x: Number(pt.x) || 0, y: Number(pt.y) || 0, z: Number(pt.z) || 0};
+      }
+      return null;
+    })
+    .filter(Boolean);
+  if (!points.length) return presets;
+
+  const selectByRange = (minDeg, maxDeg) => {
+    let best = null;
+    let bestRadius = -Infinity;
+    for (const pt of points) {
+      const angle = THREE.MathUtils.radToDeg(Math.atan2(pt.x, pt.y));
+      if (angle < minDeg || angle > maxDeg) continue;
+      const radius = Math.hypot(pt.x, pt.y);
+      if (radius > bestRadius) {
+        best = pt;
+        bestRadius = radius;
+      }
+    }
+    return best;
+  };
+
+  const selectFallback = () => {
+    let best = points[0];
+    let bestRadius = Math.hypot(best.x, best.y);
+    for (let i = 1; i < points.length; i++) {
+      const radius = Math.hypot(points[i].x, points[i].y);
+      if (radius > bestRadius) {
+        bestRadius = radius;
+        best = points[i];
+      }
+    }
+    return best;
+  };
+
+  const ranges = {
+    lf_stand: [[-80, -40], [-100, -30]],
+    cf_stand: [[-8, 8], [-12, 12]],
+    rf_stand: [[40, 80], [30, 100]],
+  };
+  const standConfigs = {
+    lf_stand: {distance: 90, height: 100},
+    cf_stand: {distance: 110, height: 130},
+    rf_stand: {distance: 90, height: 100},
+  };
+
+  for (const [stand, searchRanges] of Object.entries(ranges)) {
+    let candidate = null;
+    for (const [minDeg, maxDeg] of searchRanges) {
+      candidate = selectByRange(minDeg, maxDeg);
+      if (candidate) break;
+    }
+    if (!candidate) candidate = selectFallback();
+    if (!candidate) continue;
+    const cfg = standConfigs[stand] || {distance: 90, height: 100};
+    tmpVecA.set(candidate.x, candidate.y, 0);
+    const radius = tmpVecA.length();
+    if (radius === 0) continue;
+    tmpVecA.normalize().multiplyScalar(cfg.distance);
+    const pos = [
+      candidate.x + tmpVecA.x,
+      candidate.y + tmpVecA.y,
+      (candidate.z || 0) + cfg.height,
+    ];
+    presets[stand] = {pos, lookAt: [...ORIGIN_LOOK_AT]};
+  }
+
+  return presets;
 }
 
 function getCameraPreset(name, mode = state.cameraMode) {
   const selectedMode = mode || state.cameraMode;
   const modePresets = (cameraPresets && cameraPresets[selectedMode]) || {};
-  const fallbackGroup = selectedMode === 'outfield' ? DEFAULT_OUTFIELD_PRESETS : DEFAULT_INFIELD_PRESETS;
-  const fallbackPreset = fallbackGroup[name] || DEFAULT_INFIELD_PRESETS[name] || DEFAULT_INFIELD_PRESETS.catcher;
+  const baseGroup = (cameraPresets && cameraPresets.__base && cameraPresets.__base[selectedMode])
+    || (selectedMode === 'outfield' ? BASE_OUTFIELD_PRESETS : BASE_INFIELD_PRESETS);
+  const fallbackGroup = baseGroup || (selectedMode === 'outfield' ? BASE_OUTFIELD_PRESETS : BASE_INFIELD_PRESETS);
+  const fallbackPreset = fallbackGroup[name] || BASE_INFIELD_PRESETS[name] || BASE_INFIELD_PRESETS.catcher;
   const preset = modePresets[name] || fallbackPreset;
   if (!preset) return null;
-  const posFallback = fallbackPreset.pos || DEFAULT_INFIELD_PRESETS.catcher.pos;
-  const lookFallback = fallbackPreset.lookAt || DEFAULT_INFIELD_PRESETS.catcher.lookAt;
+  const posFallback = fallbackPreset.pos || BASE_INFIELD_PRESETS.catcher.pos;
+  const lookFallback = fallbackPreset.lookAt || BASE_INFIELD_PRESETS.catcher.lookAt;
   const pos = toVec3(preset.pos, posFallback);
   let lookAt = toVec3(preset.lookAt, lookFallback);
   if (selectedMode === 'outfield' && /_stand$/.test(name)) {
@@ -204,7 +343,9 @@ async function loadData() {
     fetchJSON('playlist.json'),
   ]);
   theme = config.theme || {};
-  cameraPresets = buildCameraPresets(config.camera_presets || {});
+  state.approachConfig = parseApproachConfig(theme.approach || {});
+  const outfieldDefaults = deriveOutfieldApproachPresets(config.ballpark || {});
+  cameraPresets = buildCameraPresets(config.camera_presets || {}, {outfield: outfieldDefaults});
   state.cameraMode = 'infield';
   state.lastPresetByMode = {infield: 'catcher', outfield: 'cf_stand'};
   state.lastPreset = 'catcher';
@@ -237,11 +378,18 @@ function setupScene(ballpark) {
   controls.dampingFactor = 0.08;
   controls.target.set(0, 180, 6);
 
-  const ballColor = theme.trajectory?.ball_color || theme.trajectory?.color || '#E03C31';
+  const ballColor = theme.trajectory?.ball_color || theme.trajectory?.color || DEFAULT_BALL_COLOR;
   const ballRadius = theme.trajectory?.ball_radius ?? 1.5;
-  ball = new THREE.Mesh(new THREE.SphereGeometry(ballRadius, 32, 32),
-                        new THREE.MeshBasicMaterial({color: ballColor}));
+  const ballMaterial = new THREE.MeshBasicMaterial({color: ballColor});
+  if (state.approachConfig.nearBehavior === 'fade') {
+    ballMaterial.transparent = true;
+    ballMaterial.opacity = 1;
+  }
+  ball = new THREE.Mesh(new THREE.SphereGeometry(ballRadius, 32, 32), ballMaterial);
+  ball.visible = false;
+  ball.userData.baseOpacity = ballMaterial.opacity;
   scene.add(ball);
+  resetBallAppearance();
 
   addBallparkWireframe(ballpark);   // ワイヤーフレーム
   addGroundGrid();
@@ -329,8 +477,13 @@ function applyCameraPreset(name, options = {}) {
   state.lastPresetByMode[mode] = name;
   state.lastPreset = name;
   camera.position.set(...preset.pos);
-  controls.target.set(...preset.lookAt);
+  if (state.followBall && ball) {
+    controls.target.copy(ball.position);
+  } else {
+    controls.target.set(...preset.lookAt);
+  }
   controls.update();
+  resetViewAdjust();
   const select = $('selCameraMode');
   if (select && select.value !== state.cameraMode) {
     select.value = state.cameraMode;
@@ -358,43 +511,36 @@ function updateOverlay(play) {
 function setupTrajectory(play) {
   clearTrajectory();
   const lineWidth = theme.trajectory?.line_width || 4;
-  const color = new THREE.Color(theme.trajectory?.color || '#E03C31');
+  const color = new THREE.Color(theme.trajectory?.color || DEFAULT_TRAJECTORY_COLOR);
   const geometry = new LineGeometry();
   const positions = [];
   play.points.forEach(p => { positions.push(p.x, p.y, p.z); });
   geometry.setPositions(positions);
+  geometry.setDrawRange(0, 0);
   const material = new LineMaterial({ color, linewidth: lineWidth, transparent: true, worldUnits: false });
-  material.opacity = theme.trajectory?.base_opacity ?? 0.35;
+  material.opacity = theme.trajectory?.base_opacity ?? 0.95;
   material.resolution.set(renderer.domElement.clientWidth, renderer.domElement.clientHeight);
   const line = new Line2(geometry, material);
   line.computeLineDistances();
+  line.visible = state.showTrajectory;
   scene.add(line);
-
-  const sourcePositions = new Float32Array(positions);
-  const progressGeometry = new THREE.BufferGeometry();
-  const progressPositions = new Float32Array(sourcePositions.length);
-  const progressAttribute = new THREE.BufferAttribute(progressPositions, 3);
-  progressAttribute.setUsage(THREE.DynamicDrawUsage);
-  progressGeometry.setAttribute('position', progressAttribute);
-  progressGeometry.setDrawRange(0, 0);
-  const progressMaterial = new THREE.LineBasicMaterial({color, transparent: true, opacity: 0.95});
-  const progressLine = new THREE.Line(progressGeometry, progressMaterial);
-  scene.add(progressLine);
 
   state.trajectoryLine = line;
   state.trajectoryMaterial = material;
   state.trajectory = play.points;
-  state.duration = play.points.at(-1).t ?? (play.points.length / 60);
+  const lastPoint = play.points.at(-1);
+  const lastTime = lastPoint != null ? Number(lastPoint.t) : null;
+  state.duration = Number.isFinite(lastTime) ? lastTime : (play.points.length / 60);
   state.time = 0;
   state.segmentIndex = 0;
+  state.showTrajectory = false;
+  if (ball) ball.visible = false;
+  if (state.trajectoryLine) state.trajectoryLine.visible = false;
+  const totalSegments = Math.max(0, play.points.length - 1);
   state.progress = {
-    line: progressLine,
-    geometry: progressGeometry,
-    material: progressMaterial,
-    sourcePositions,
-    drawPositions: progressPositions,
-    totalPoints: play.points.length,
-    lastDrawn: 0,
+    geometry,
+    totalSegments,
+    lastSegments: -1,
   };
 
   updateBallPosition(0);
@@ -418,9 +564,11 @@ function sampleTrajectory(points, t) {
 }
 
 function updateBallPosition(time) {
-  if (!state.trajectory) return;
+  if (!state.trajectory || !ball) return;
   const p = sampleTrajectory(state.trajectory, time);
-  ball.position.set(p.x, p.y, p.z);
+  tmpVecB.set(p.x, p.y, p.z);
+  applyApproachAdjustments(tmpVecB);
+  ball.position.copy(tmpVecB);
   if (state.followBall) controls.target.copy(ball.position);
 }
 
@@ -432,37 +580,251 @@ function clearTrajectory() {
     state.trajectoryLine = null;
     state.trajectoryMaterial = null;
   }
-  if (state.progress) {
-    if (state.progress.line) scene.remove(state.progress.line);
-    state.progress.geometry?.dispose?.();
-    state.progress.material?.dispose?.();
-    state.progress = null;
-  }
+  state.progress = null;
   state.trajectory = null;
+  state.showTrajectory = false;
+  if (ball) ball.visible = false;
 }
 
 function updateTrajectoryProgress(time) {
   const progress = state.progress;
   if (!progress || !state.trajectory) return;
-  if (progress.totalPoints < 2) return;
-  const duration = state.duration || (state.trajectory.length / 60);
-  const clamped = duration > 0 ? Math.min(Math.max(time, 0), duration) : time;
-  const segments = progress.totalPoints - 1;
-  let pointsToShow = segments > 0 && duration > 0 ? Math.floor((clamped / duration) * segments) + 1 : progress.totalPoints;
-  pointsToShow = Math.min(progress.totalPoints, Math.max(2, pointsToShow));
-  if (progress.lastDrawn === pointsToShow) return;
-  const source = progress.sourcePositions;
-  const target = progress.drawPositions;
-  const drawLength = pointsToShow * 3;
-  if (pointsToShow === 2 && clamped <= 0) {
-    target.set(source.subarray(0, 3));
-    target.set(source.subarray(0, 3), 3);
-  } else {
-    target.set(source.subarray(0, drawLength));
+  const totalSegments = progress.totalSegments;
+  if (totalSegments <= 0) {
+    progress.geometry.setDrawRange(0, 0);
+    progress.lastSegments = 0;
+    if (state.trajectoryLine) state.trajectoryLine.visible = false;
+    return;
   }
-  progress.geometry.setDrawRange(0, pointsToShow);
-  progress.geometry.attributes.position.needsUpdate = true;
-  progress.lastDrawn = pointsToShow;
+  if (!state.showTrajectory) {
+    progress.geometry.setDrawRange(0, 0);
+    progress.lastSegments = -1;
+    if (state.trajectoryLine) state.trajectoryLine.visible = false;
+    return;
+  }
+  const duration = state.duration || (state.trajectory.length / 60) || 1;
+  const clamped = duration > 0 ? Math.min(Math.max(time, 0), duration) : time;
+  let visibleSegments = duration > 0 ? Math.floor((clamped / duration) * totalSegments) : totalSegments;
+  if (clamped >= duration) visibleSegments = totalSegments;
+  visibleSegments = Math.max(0, Math.min(totalSegments, visibleSegments));
+  if (progress.lastSegments === visibleSegments) {
+    if (state.trajectoryLine) state.trajectoryLine.visible = state.trajectoryLine.visible || visibleSegments > 0;
+    return;
+  }
+  progress.geometry.setDrawRange(0, visibleSegments);
+  progress.lastSegments = visibleSegments;
+  if (state.trajectoryLine) state.trajectoryLine.visible = visibleSegments > 0;
+}
+
+function resetBallAppearance() {
+  if (!ball) return;
+  const mat = ball.material;
+  if (!mat) return;
+  const baseOpacity = ball.userData?.baseOpacity ?? 1;
+  let needsUpdate = false;
+  if (state.approachConfig.nearBehavior === 'fade') {
+    if (!mat.transparent) { mat.transparent = true; needsUpdate = true; }
+  } else if (mat.transparent) {
+    mat.transparent = false;
+    needsUpdate = true;
+  }
+  if (Math.abs((mat.opacity ?? 1) - baseOpacity) > 0.01) {
+    mat.opacity = baseOpacity;
+    needsUpdate = true;
+  }
+  if (needsUpdate) mat.needsUpdate = true;
+  ball.scale.set(1, 1, 1);
+}
+
+function applyApproachAdjustments(position) {
+  if (!camera || !controls) return position;
+  const config = state.approachConfig || DEFAULT_APPROACH_CONFIG;
+  if (state.cameraMode !== 'outfield') {
+    resetBallAppearance();
+    return position;
+  }
+
+  const behavior = config.nearBehavior || 'stop';
+  const camPos = camera.position;
+  const dist = position.distanceTo(camPos);
+
+  if (behavior === 'fade') {
+    const fadeStart = Math.max(Number(config.fadeStart) || DEFAULT_APPROACH_CONFIG.fadeStart, 1);
+    const fadeEndRaw = Number(config.fadeEnd) || DEFAULT_APPROACH_CONFIG.fadeEnd;
+    const fadeEnd = Math.max(0.5, Math.min(fadeStart - 0.5, fadeEndRaw));
+    let opacity = 1;
+    if (dist <= fadeEnd) {
+      opacity = 0.12;
+    } else if (dist < fadeStart) {
+      const t = (dist - fadeEnd) / Math.max(fadeStart - fadeEnd, 1);
+      opacity = 0.12 + Math.max(0, Math.min(1, t)) * 0.88;
+    }
+    const mat = ball.material;
+    if (mat) {
+      if (!mat.transparent) { mat.transparent = true; mat.needsUpdate = true; }
+      const clamped = Math.max(0.12, Math.min(1, opacity));
+      if (Math.abs((mat.opacity ?? 1) - clamped) > 0.01) {
+        mat.opacity = clamped;
+        mat.needsUpdate = true;
+      }
+    }
+  } else {
+    resetBallAppearance();
+  }
+
+  if (behavior === 'stop') {
+    const minDist = Math.max(2, Number(config.stopDistance) || DEFAULT_APPROACH_CONFIG.stopDistance);
+    if (dist < minDist) {
+      tmpVecC.copy(position).sub(camPos);
+      if (tmpVecC.lengthSq() > 1e-6) {
+        tmpVecC.setLength(minDist);
+        position.copy(camPos).add(tmpVecC);
+      }
+    }
+  } else if (behavior === 'dolly') {
+    const minDist = Math.max(4, Number(config.stopDistance) || DEFAULT_APPROACH_CONFIG.stopDistance);
+    if (dist < minDist) {
+      tmpVecC.copy(camera.position).sub(controls.target);
+      if (tmpVecC.lengthSq() > 1e-6) {
+        const retreatBase = Number(config.dollyRetreat) || DEFAULT_APPROACH_CONFIG.dollyRetreat;
+        const retreat = Math.max(minDist - dist, 0) + Math.max(retreatBase, 0) * 0.02;
+        const newLength = tmpVecC.length() + retreat;
+        tmpVecC.setLength(newLength);
+        camera.position.copy(controls.target).add(tmpVecC);
+      }
+    }
+  }
+
+  return position;
+}
+
+function resetViewAdjust() {
+  state.viewAdjust.yawDir = 0;
+  state.viewAdjust.panDir = 0;
+  adjustLastTime = null;
+  activeKeyAdjust.clear();
+}
+
+function applyYawStep(amountDeg) {
+  if (!camera || !controls || !Number.isFinite(amountDeg) || amountDeg === 0) return;
+  tmpVecA.copy(camera.position).sub(controls.target);
+  const angle = THREE.MathUtils.degToRad(amountDeg);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const x = tmpVecA.x;
+  const y = tmpVecA.y;
+  tmpVecA.x = cos * x - sin * y;
+  tmpVecA.y = sin * x + cos * y;
+  camera.position.copy(tmpVecB.copy(controls.target).add(tmpVecA));
+}
+
+function applyPanStep(amount) {
+  if (!controls || !Number.isFinite(amount) || amount === 0) return;
+  controls.pan(amount, 0);
+}
+
+function startAdjust(type, dir) {
+  const prop = type === 'yaw' ? 'yawDir' : 'panDir';
+  if (state.viewAdjust[prop] === dir) return;
+  state.viewAdjust[prop] = dir;
+  adjustLastTime = null;
+}
+
+function stopAdjust(type, dir) {
+  const prop = type === 'yaw' ? 'yawDir' : 'panDir';
+  if (state.viewAdjust[prop] === dir) {
+    state.viewAdjust[prop] = 0;
+    adjustLastTime = null;
+  }
+}
+
+function applyAdjustStep(type, dir) {
+  if (type === 'yaw') applyYawStep(dir * YAW_STEP_DEG);
+  else applyPanStep(dir * PAN_STEP);
+}
+
+function updateViewAdjust() {
+  const {yawDir, panDir, yawSpeed, panSpeed} = state.viewAdjust;
+  if (!yawDir && !panDir) {
+    adjustLastTime = null;
+    return;
+  }
+  const now = performance.now();
+  if (adjustLastTime == null) {
+    adjustLastTime = now;
+    return;
+  }
+  const deltaSec = Math.min((now - adjustLastTime) / 1000, 0.2);
+  adjustLastTime = now;
+  if (yawDir) applyYawStep(yawDir * yawSpeed * deltaSec);
+  if (panDir) applyPanStep(panDir * panSpeed * deltaSec);
+}
+
+function isInteractiveElement(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  if (!tag) return false;
+  return ['INPUT', 'SELECT', 'TEXTAREA'].includes(tag) || el.isContentEditable;
+}
+
+function bindAdjustButton(id, type, dir) {
+  const el = $(id);
+  if (!el) return;
+  let pointerActive = false;
+  const pointerDown = (e) => {
+    if (typeof e.button === 'number' && e.button !== 0) return;
+    pointerActive = true;
+    e.preventDefault();
+    applyAdjustStep(type, dir);
+    startAdjust(type, dir);
+  };
+  const pointerEnd = () => {
+    if (!pointerActive) return;
+    pointerActive = false;
+    stopAdjust(type, dir);
+  };
+  const pointerCancel = () => {
+    if (!pointerActive) return;
+    pointerActive = false;
+    stopAdjust(type, dir);
+  };
+  el.addEventListener('pointerdown', pointerDown);
+  el.addEventListener('pointerup', pointerEnd);
+  el.addEventListener('pointerleave', pointerCancel);
+  el.addEventListener('pointercancel', pointerCancel);
+  el.addEventListener('click', (e) => {
+    if (e.detail !== 0) {
+      e.preventDefault();
+      return;
+    }
+    e.preventDefault();
+    applyAdjustStep(type, dir);
+  });
+}
+
+function handleKeyDownAdjust(e) {
+  const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+  const binding = KEY_ADJUST_BINDINGS[key];
+  if (!binding) return;
+  if (isInteractiveElement(e.target)) return;
+  const token = `${binding.type}:${binding.dir}`;
+  if (activeKeyAdjust.has(token)) return;
+  activeKeyAdjust.add(token);
+  applyAdjustStep(binding.type, binding.dir);
+  startAdjust(binding.type, binding.dir);
+  e.preventDefault();
+}
+
+function handleKeyUpAdjust(e) {
+  const key = typeof e.key === 'string' ? e.key.toLowerCase() : '';
+  const binding = KEY_ADJUST_BINDINGS[key];
+  if (!binding) return;
+  const token = `${binding.type}:${binding.dir}`;
+  if (activeKeyAdjust.has(token)) {
+    activeKeyAdjust.delete(token);
+    stopAdjust(binding.type, binding.dir);
+    e.preventDefault();
+  }
 }
 
 function attachUI() {
@@ -475,6 +837,15 @@ function attachUI() {
   document.querySelectorAll('[data-view]').forEach((btn) => {
     btn.addEventListener('click', () => applyCameraPreset(btn.dataset.view));
   });
+  [
+    ['btnYawLeft', 'yaw', -1],
+    ['btnYawRight', 'yaw', 1],
+    ['btnPanLeft', 'pan', -1],
+    ['btnPanRight', 'pan', 1],
+  ].forEach(([id, type, dir]) => bindAdjustButton(id, type, dir));
+  window.addEventListener('keydown', handleKeyDownAdjust);
+  window.addEventListener('keyup', handleKeyUpAdjust);
+  window.addEventListener('blur', () => resetViewAdjust());
   $('chkFollow').addEventListener('change', (e) => {
     state.followBall = e.target.checked;
     if (state.followBall) controls.target.copy(ball.position);
@@ -483,6 +854,7 @@ function attachUI() {
       const preset = getCameraPreset(presetName);
       if (preset) controls.target.set(...preset.lookAt);
     }
+    resetViewAdjust();
     controls.update();
   });
   const modeSelect = $('selCameraMode');
@@ -545,6 +917,13 @@ function togglePlay(force) {
     updateBallPosition(0);
     updateTrajectoryProgress(0);
   }
+  if (desired && state.trajectory) {
+    if (!state.showTrajectory) {
+      state.showTrajectory = true;
+      updateTrajectoryProgress(state.time);
+    }
+    if (ball) ball.visible = true;
+  }
   state.playing = desired;
   if (state.playing) {
     clock?.start();
@@ -603,6 +982,7 @@ function animate() {
     updateBallPosition(state.time);
   }
   updateTrajectoryProgress(state.time);
+  updateViewAdjust();
   controls.update();
   renderer.render(scene, camera);
 }

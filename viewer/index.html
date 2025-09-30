@@ -38,11 +38,19 @@
         <button data-view="lf_stand">LF Stand</button>
         <button data-view="cf_stand">CF Stand</button>
         <button data-view="rf_stand">RF Stand</button>
+        <div class="view-adjust" role="group" aria-label="Horizontal view controls">
+          <span class="view-adjust__label">Yaw</span>
+          <button type="button" id="btnYawLeft" class="mini" aria-label="Yaw left (A)" title="Yaw left (A)">⟲</button>
+          <button type="button" id="btnYawRight" class="mini" aria-label="Yaw right (D)" title="Yaw right (D)">⟳</button>
+          <span class="view-adjust__label">Pan</span>
+          <button type="button" id="btnPanLeft" class="mini" aria-label="Pan left (J)" title="Pan left (J)">◀</button>
+          <button type="button" id="btnPanRight" class="mini" aria-label="Pan right (L)" title="Pan right (L)">▶</button>
+        </div>
         <label><input type="checkbox" id="chkFollow" /> Follow Ball</label>
         <label>Camera Mode
           <select id="selCameraMode">
             <option value="infield" selected>Infield-centric</option>
-            <option value="outfield">Outfield-vantage</option>
+            <option value="outfield">Outfield-approach</option>
           </select>
         </label>
       </div>
