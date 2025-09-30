@@ -14,7 +14,9 @@
     "line_width": 3.0
   },
   "animation": {
-    "ft_per_sec": 150.0,
+    "mode": "line_only",
+    "duration_seconds": 4.0,
+    "ft_per_sec": 140.0,
     "ease": "linear"
   },
   "overlay": {

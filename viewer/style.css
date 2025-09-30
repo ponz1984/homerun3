@@ -87,7 +87,3 @@ html, body { height:100%; margin:0; font-family: system-ui, -apple-system, Segoe
 }
 #canvasWrap { position: absolute; top: var(--ui-offset, 74px); left:0; right:0; bottom:0; }
 #glcanvas { width:100%; height:100%; display:block; background:#f5f7fb; }
-.hint {
-  position: fixed; left:12px; bottom:12px; background: rgba(250,250,250,0.9);
-  padding:8px 12px; border:1px solid #e5e7eb; border-radius:6px; font-size:0.9rem; color:#4b5563;
-}
