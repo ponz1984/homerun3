@@ -903,7 +903,7 @@ function addGroundGrid() {
 }
 
 function addBallparkWireframe(ballpark) {
-  const lineColor = new THREE.Color(theme.ballpark?.line_color || '#f5f5f5');
+  const lineColor = new THREE.Color(theme.ballpark?.line_color || '#ffffff');
   const lineWidth = theme.ballpark?.line_width || 1;
   const material = new THREE.LineBasicMaterial({color: lineColor, linewidth: lineWidth});
   const toVec = (p) => {
