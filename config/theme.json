@@ -12,7 +12,8 @@
   "trajectory": {
     "color": "#E03C31",
     "line_width": 3.0,
-    "ball_color": "#E03C31"
+    "ball_color": "#E03C31",
+    "ball_radius": 0.6
   },
   "overlay": {
     "text_color": "#333333"

@@ -13,6 +13,7 @@
       }
     }
     </script>
+    <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
     <script type="module" src="app.js"></script>
   </head>
   <body>
@@ -38,12 +39,29 @@
         <button data-view="cf_stand">CF Stand</button>
         <button data-view="rf_stand">RF Stand</button>
         <label><input type="checkbox" id="chkFollow" /> Follow Ball</label>
+        <label>Camera Mode
+          <select id="selCameraMode">
+            <option value="infield" selected>Infield-centric</option>
+            <option value="outfield">Outfield-vantage</option>
+          </select>
+        </label>
+      </div>
+      <div class="csv-tools">
+        <button id="btnCsvSelect" type="button">Select CSV…</button>
+        <input type="file" id="csvFile" accept=".csv" hidden />
+        <div id="csvDropZone" class="csv-drop" tabindex="0" role="button" aria-label="Drop CSV file or click to choose">
+          Drop CSV here or click to choose
+        </div>
+        <span id="csvStatus" class="status-message" aria-live="polite"></span>
       </div>
       <div class="overlay" id="overlay">
         <span id="ovInning">Inning: -</span>
         <span id="ovOuts">Outs: -</span>
         <span id="ovBatter">Batter: -</span>
         <span id="ovEvent">Event: -</span>
+        <span id="ovDate">Date: -</span>
+        <span id="ovBatTeam">Bat Team: -</span>
+        <span id="ovOppTeam">Opp Team: -</span>
       </div>
     </div>
     <div id="canvasWrap">
