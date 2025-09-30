@@ -1,88 +1,33 @@
 {
   "schema": "mlbtraj/ballpark-v1",
-  "slug": "lad-dodger-stadium",
-  "name": "Dodger Stadium",
+  "slug": "chc-wrigley-field",
+  "name": "Wrigley Field",
   "year": 2024,
   "distance_by_label_ft": {
-    "LF": 330,
+    "LF": 355,
     "SLF": 360,
-    "LFA": 375,
-    "LCF": 385,
+    "LFA": 368,
+    "LCF": 368,
     "CF": 400,
-    "RCF": 385,
-    "RFA": 375,
+    "RCF": 368,
+    "RFA": 368,
     "SRF": 360,
-    "RF": 330
+    "RF": 353
   },
   "wall_height_ft": {
-    "LF": 4,
-    "LCF": 8,
-    "CF": 8,
-    "RCF": 8,
-    "RF": 4
+    "LF": 15.0,
+    "LCF": 11.5,
+    "CF": 11.5,
+    "RCF": 11.5,
+    "RF": 15.0
   },
-  "angle_convention": "FanGraphs (RF=0\u00b0, CCW\u2192LF=90\u00b0)",
+  "angle_convention": "FanGraphs (RF=0°, CCW→LF=90°)",
   "interpolation": "polyline",
   "camera_presets": {
-    "catcher": {
-      "pos": [
-        -5,
-        -20,
-        6
-      ],
-      "lookAt": [
-        0,
-        60,
-        6
-      ]
-    },
-    "if_high": {
-      "pos": [
-        0,
-        -120,
-        55
-      ],
-      "lookAt": [
-        0,
-        140,
-        10
-      ]
-    },
-    "lf_stand": {
-      "pos": [
-        -260,
-        180,
-        50
-      ],
-      "lookAt": [
-        0,
-        200,
-        10
-      ]
-    },
-    "cf_stand": {
-      "pos": [
-        0,
-        420,
-        70
-      ],
-      "lookAt": [
-        0,
-        200,
-        10
-      ]
-    },
-    "rf_stand": {
-      "pos": [
-        260,
-        180,
-        50
-      ],
-      "lookAt": [
-        0,
-        200,
-        10
-      ]
-    }
+    "catcher": { "pos": [-5, -20, 6], "lookAt": [0, 60, 6] },
+    "if_high": { "pos": [0, -120, 55], "lookAt": [0, 140, 10] },
+    "lf_stand": { "pos": [-260, 180, 50], "lookAt": [0, 200, 10] },
+    "cf_stand": { "pos": [0, 420, 70], "lookAt": [0, 200, 10] },
+    "rf_stand": { "pos": [260, 180, 50], "lookAt": [0, 200, 10] }
   }
 }
