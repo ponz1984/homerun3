@@ -1,6 +1,10 @@
 {
   "schema": "mlbtraj/ballpark-registry-v1",
   "parks": [
+ { "slug": "chc-wrigley-field",
+      "name": "Wrigley Field",
+      "aliases": ["chc", "cubs", "wrigley", "wrigley-field"]
+    }
     {
       "slug": "lad-dodger-stadium",
       "name": "Dodger Stadium",
