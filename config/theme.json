@@ -13,14 +13,11 @@
     "color": "#DC2626",
     "ball_color": "#DC2626",
     "line_width": 6,
-    "ball_radius": 1.0,
-    "always_on_top": true
+    "ball_radius": 1.0
   },
   "animation": {
-    "mode": "reveal_with_ball",
-    "duration_seconds": 1.5,
-    "ease": "linear",
-    "strict_direction": true
+    "mode": "sync_line_and_ball",
+    "duration_seconds": 1.5
   },
   "overlay": {
     "text_color": "#333333"
