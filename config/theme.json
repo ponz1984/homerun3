@@ -1,7 +1,7 @@
 {
   "background": "#f5f7fb",
   "ballpark": {
-    "line_color": "#8892a6",
+    "line_color": "#ffffff",
     "line_width": 1.0
   },
   "ground_grid": {
