@@ -13,13 +13,50 @@ This project reconstructs 3D batted-ball trajectories from Baseball Savant CSV e
 - Theme overrides via `bundle-viewer --theme config/theme.json`
 
 ## Quick start
-```bash
-python -m pip install -e .
-mlbtraj simulate data/samples/sample.csv --park lad-dodger-stadium --out out/lad --calibrate-distance
-mlbtraj bundle-viewer --playlist out/lad/playlist.json --dest dist/lad --theme config/theme.json
-python -m http.server --directory dist/lad 8080
-```
-Then open <http://localhost:8080> to explore the wireframe viewer. Use the toolbar to scrub through plays, adjust playback speed, switch camera presets (Catcher, IF High, LF/CF/RF stands), and optionally enable automatic follow mode that keeps the camera trained on the ball.
+1. **Reset any leftover web servers (Codespaces default path shown).**
+   ```bash
+   cd /workspaces/homerun3
+   pkill -f "http.server" || true
+   ```
+2. **Simulate trajectories from the sample Statcast export.**
+   ```bash
+   python -m mlbtraj.cli simulate data/samples/sample.csv \
+     --park lad-dodger-stadium --out out/lad --calibrate-distance
+   ```
+   The command builds `out/lad/playlist.json` plus per-play JSON trajectories under `out/lad/trajectories/`.
+3. **Bundle the static viewer with the generated playlist and theme.**
+   ```bash
+   python -m mlbtraj.cli bundle-viewer \
+     --playlist out/lad/playlist.json \
+     --park lad-dodger-stadium \
+     --dest dist/lad --theme config/theme.json
+   ```
+4. **Serve the bundle on port 8088.**
+   ```bash
+   python -m http.server --directory dist/lad 8088
+   ```
+5. **Open the viewer.** In Codespaces, expose port **8088** via _Ports_ → _Open in Browser_, then hard-refresh with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> to bypass caches. The toolbar offers playback controls, camera presets, follow-ball, speed, and mode toggles.
+
+### CSV uploads (in-browser)
+- Use the **Select CSV…** button or drag-and-drop a Statcast-style CSV onto the upload zone.
+- Required columns: `events`, `launch_speed`, `launch_angle`, `spray_angle` (or `hc_x`/`hc_y`), `inning`, `inning_half` (or `inning_topbot`), `outs`, `player_name`, `game_date`, `bat_team`, `opp_team`.
+- The viewer parses the file entirely client-side (PapaParse + lightweight physics) and reports `Loaded N plays…`. Press **Start** to begin the animated replay; playback, speed, follow-ball, and camera options remain interactive.
+
+### Switching ballparks
+- Re-run the simulation with a different park slug, e.g.:
+  ```bash
+  python -m mlbtraj.cli simulate data/samples/sample.csv \
+    --park sea-t-mobile-park --out out/sea --calibrate-distance
+  ```
+- Bundle to a new destination (e.g. `dist/sea`) and point the HTTP server at that directory.
+
+### Troubleshooting
+- **Port busy:** re-run `pkill -f "http.server" || true`, then restart the server.
+- **404s / stale assets:** ensure the bundle destination matches the HTTP server directory and hard-refresh the browser (Ctrl+Shift+R).
+- **Import map errors:** the viewer relies on the import map in `viewer/index.html`; confirm it is intact when customising the bundle.
+- **Console errors:** open the browser dev tools console—CSV parse issues or missing columns are reported there alongside the on-screen status banner.
+
+Existing bundled playlists remain compatible; the viewer continues to accept `trajectory`/`trajectory_file` references, auto-filling legacy metadata fields where required.
 
 ### Ballpark selection
 - `--park <slug>` picks a preset from the registry (aliases such as `lad` work)

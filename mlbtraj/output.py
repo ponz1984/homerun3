@@ -67,9 +67,12 @@ class OutputWriter:
                     {
                         "play_id": result.event.play_id,
                         "game_pk": result.event.game_pk,
+                        "game_date": result.event.game_date,
                         "inning": result.event.inning,
                         "inning_half": result.event.inning_half,
                         "outs": result.event.outs,
+                        "bat_team": result.event.bat_team,
+                        "opp_team": result.event.opp_team,
                         "player_name": result.event.player_name,
                         "events": result.event.events,
                         "description": result.event.description,

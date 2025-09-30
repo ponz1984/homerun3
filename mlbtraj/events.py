@@ -21,9 +21,12 @@ class PlayEvent:
     play_id: str
     row_index: int
     game_pk: str
+    game_date: str
     inning: int
     inning_half: str
     outs: int
+    bat_team: str
+    opp_team: str
     player_name: str
     events: str
     description: str
@@ -82,10 +85,12 @@ class EventLoader:
                 spin_rpm = self._optional_float(row, _OPTIONAL_SPIN) or 1800.0
                 spray = self.transform.spray_angle(hc_x, hc_y)
                 game_pk = str(row.get("game_pk", "unknown"))
+                game_date = str(row.get("game_date") or "")
                 play_id = str(row.get("play_id") or f"{game_pk}-{idx+1}")
                 inning = int(row.get("inning", 0) or 0)
                 inning_half = str(row.get("inning_topbot", "")) or "Unknown"
                 outs = int(row.get("outs_when_up", 0) or 0)
+                bat_team, opp_team = _infer_teams(row, inning_half)
                 player_name = str(row.get("player_name") or row.get("batter_name") or "Unknown")
                 event_label = str(row.get("events") or row.get("event")) or "Unknown"
                 description = str(row.get("des") or row.get("description") or "")
@@ -94,9 +99,12 @@ class EventLoader:
                         play_id=play_id,
                         row_index=idx,
                         game_pk=game_pk,
+                        game_date=game_date,
                         inning=inning,
                         inning_half=inning_half,
                         outs=outs,
+                        bat_team=bat_team,
+                        opp_team=opp_team,
                         player_name=player_name,
                         events=event_label,
                         description=description,
@@ -148,3 +156,30 @@ def extract_venue_id(events: list[PlayEvent]) -> int | None:
             except (TypeError, ValueError):
                 continue
     return None
+
+
+def _infer_teams(row: dict[str, Any], inning_half: str) -> tuple[str, str]:
+    bat_team = str(
+        row.get("bat_team")
+        or row.get("batting_team")
+        or row.get("bat_team_name")
+        or ""
+    )
+    opp_team = str(row.get("opp_team") or row.get("opponent_team") or "")
+    home_team = str(row.get("home_team") or "")
+    away_team = str(row.get("away_team") or "")
+
+    half = (inning_half or "").lower()
+    if not bat_team:
+        if half.startswith("top"):
+            bat_team = away_team
+            opp_team = opp_team or home_team
+        elif half.startswith("bot"):
+            bat_team = home_team
+            opp_team = opp_team or away_team
+    if not opp_team:
+        if bat_team and bat_team == home_team:
+            opp_team = away_team
+        elif bat_team and bat_team == away_team:
+            opp_team = home_team
+    return bat_team or "", opp_team or ""

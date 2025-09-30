@@ -128,7 +128,7 @@ def _run_bundle(args: argparse.Namespace) -> int:
 
     dest = args.dest
     dest.mkdir(parents=True, exist_ok=True)
-    for filename in ("index.html", "style.css", "app.js"):
+    for filename in ("index.html", "style.css", "app.js", "physics-lite.js"):
         shutil.copy2(VIEWER_DIR / filename, dest / filename)
     theme_path = args.theme or DEFAULT_THEME_PATH
     theme_payload = json.loads(Path(theme_path).read_text())

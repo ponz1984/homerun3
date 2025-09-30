@@ -4,6 +4,7 @@ import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {Line2} from 'three/addons/lines/Line2.js';
 import {LineGeometry} from 'three/addons/lines/LineGeometry.js';
 import {LineMaterial} from 'three/addons/lines/LineMaterial.js';
+import {loadPlaysFromCsv} from './physics-lite.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -20,10 +21,124 @@ const state = {
   duration: 0,
   time: 0,
   segmentIndex: 0,
+  progress: null,
+  cameraMode: 'infield',
+  lastPresetByMode: {infield: 'catcher', outfield: 'cf_stand'},
   lastPreset: 'catcher',
+  statusTimer: null,
 };
 
 let renderer, scene, camera, controls, ball, theme, cameraPresets, clock;
+
+const DEFAULT_INFIELD_PRESETS = {
+  catcher: {pos: [-5, -20, 6], lookAt: [0, 60, 6]},
+  if_high: {pos: [0, -120, 55], lookAt: [0, 140, 10]},
+  lf_stand: {pos: [-260, 180, 50], lookAt: [0, 200, 10]},
+  cf_stand: {pos: [0, 420, 70], lookAt: [0, 200, 10]},
+  rf_stand: {pos: [260, 180, 50], lookAt: [0, 200, 10]},
+};
+
+const DEFAULT_OUTFIELD_PRESETS = {
+  catcher: {pos: [0, 360, 90], lookAt: [0, 0, 6]},
+  if_high: {pos: [0, 460, 140], lookAt: [0, 0, 6]},
+  lf_stand: {pos: [-260, 380, 90], lookAt: [0, 0, 6]},
+  cf_stand: {pos: [0, 460, 130], lookAt: [0, 0, 6]},
+  rf_stand: {pos: [260, 380, 90], lookAt: [0, 0, 6]},
+};
+
+const ORIGIN_LOOK_AT = [0, 0, 6];
+
+function toVec3(arr, fallback) {
+  if (!Array.isArray(arr) || arr.length < 3) return [...fallback];
+  return arr.slice(0, 3).map((v, idx) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback[idx] ?? 0;
+  });
+}
+
+function clonePreset(preset, fallback) {
+  const base = fallback ? {pos: [...fallback.pos], lookAt: [...fallback.lookAt]} : {pos: [0, 0, 0], lookAt: [0, 0, 0]};
+  if (!preset) return base;
+  return {
+    pos: toVec3(preset.pos, base.pos),
+    lookAt: toVec3(preset.lookAt, base.lookAt),
+  };
+}
+
+function mergePresetGroup(baseGroup, overrideGroup) {
+  const merged = {};
+  for (const [name, preset] of Object.entries(baseGroup)) {
+    merged[name] = clonePreset(preset);
+  }
+  if (overrideGroup) {
+    for (const [name, preset] of Object.entries(overrideGroup)) {
+      const base = merged[name] || clonePreset(baseGroup[name] || null);
+      merged[name] = clonePreset(preset, base);
+    }
+  }
+  return merged;
+}
+
+function buildCameraPresets(raw) {
+  if (raw && (raw.infield || raw.outfield)) {
+    return {
+      infield: mergePresetGroup(DEFAULT_INFIELD_PRESETS, raw.infield),
+      outfield: mergePresetGroup(DEFAULT_OUTFIELD_PRESETS, raw.outfield),
+    };
+  }
+  return {
+    infield: mergePresetGroup(DEFAULT_INFIELD_PRESETS, raw),
+    outfield: mergePresetGroup(DEFAULT_OUTFIELD_PRESETS, {}),
+  };
+}
+
+function getCameraPreset(name, mode = state.cameraMode) {
+  const selectedMode = mode || state.cameraMode;
+  const modePresets = (cameraPresets && cameraPresets[selectedMode]) || {};
+  const fallbackGroup = selectedMode === 'outfield' ? DEFAULT_OUTFIELD_PRESETS : DEFAULT_INFIELD_PRESETS;
+  const fallbackPreset = fallbackGroup[name] || DEFAULT_INFIELD_PRESETS[name] || DEFAULT_INFIELD_PRESETS.catcher;
+  const preset = modePresets[name] || fallbackPreset;
+  if (!preset) return null;
+  const posFallback = fallbackPreset.pos || DEFAULT_INFIELD_PRESETS.catcher.pos;
+  const lookFallback = fallbackPreset.lookAt || DEFAULT_INFIELD_PRESETS.catcher.lookAt;
+  const pos = toVec3(preset.pos, posFallback);
+  let lookAt = toVec3(preset.lookAt, lookFallback);
+  if (selectedMode === 'outfield' && /_stand$/.test(name)) {
+    lookAt = [...ORIGIN_LOOK_AT];
+  }
+  return {pos, lookAt};
+}
+
+function refreshCanvasOffset() {
+  const ui = document.querySelector('.ui');
+  if (!ui) return;
+  const rect = ui.getBoundingClientRect();
+  const offset = Math.round(rect.height + 12);
+  document.documentElement.style.setProperty('--ui-offset', `${offset}px`);
+}
+
+function setStatus(message, type = 'info', timeout = 6000) {
+  const statusEl = $('csvStatus');
+  if (!statusEl) return;
+  if (state.statusTimer) {
+    clearTimeout(state.statusTimer);
+    state.statusTimer = null;
+  }
+  statusEl.textContent = message || '';
+  const baseClass = 'status-message';
+  statusEl.className = message ? `${baseClass} ${type}` : baseClass;
+  refreshCanvasOffset();
+  if (message && timeout > 0) {
+    state.statusTimer = setTimeout(() => {
+      if (statusEl.textContent === message) {
+        statusEl.textContent = '';
+        statusEl.className = baseClass;
+        refreshCanvasOffset();
+      }
+      state.statusTimer = null;
+    }, timeout);
+  }
+}
 
 // ---------- helpers ----------
 async function fetchJSON(path) {
@@ -36,12 +151,18 @@ function toTopBot(v) {
   return s.startsWith('top') ? 'Top' : 'Bot';
 }
 function normalizePlay(p) {
+  const rawHalf = p.inning_half ?? p.topbot;
+  const half = rawHalf ? toTopBot(rawHalf) : '';
   return {
     ...p,
     batter:       p.batter ?? p.player_name ?? '',
     event:        p.event  ?? p.events      ?? '',
-    topbot:       p.topbot ?? toTopBot(p.inning_half),
+    topbot:       p.topbot ?? half,
+    inning_half:  p.inning_half ?? half,
     outs_when_up: p.outs_when_up ?? p.outs ?? 0,
+    bat_team:     p.bat_team ?? '',
+    opp_team:     p.opp_team ?? '',
+    game_date:    p.game_date ?? '',
     trajectory_path: p.trajectory ?? p.trajectory_file ?? '',
   };
 }
@@ -83,7 +204,10 @@ async function loadData() {
     fetchJSON('playlist.json'),
   ]);
   theme = config.theme || {};
-  cameraPresets = config.camera_presets || {};
+  cameraPresets = buildCameraPresets(config.camera_presets || {});
+  state.cameraMode = 'infield';
+  state.lastPresetByMode = {infield: 'catcher', outfield: 'cf_stand'};
+  state.lastPreset = 'catcher';
 
   const raw = (playlist && playlist.plays) ? playlist.plays : [];
   const plays = [];
@@ -114,15 +238,17 @@ function setupScene(ballpark) {
   controls.target.set(0, 180, 6);
 
   const ballColor = theme.trajectory?.ball_color || theme.trajectory?.color || '#E03C31';
-  ball = new THREE.Mesh(new THREE.SphereGeometry(1.5, 32, 32),
+  const ballRadius = theme.trajectory?.ball_radius ?? 1.5;
+  ball = new THREE.Mesh(new THREE.SphereGeometry(ballRadius, 32, 32),
                         new THREE.MeshBasicMaterial({color: ballColor}));
   scene.add(ball);
 
   addBallparkWireframe(ballpark);   // ワイヤーフレーム
   addGroundGrid();
-  applyCameraPreset('catcher');
+  applyCameraPreset('catcher', {mode: state.cameraMode});
 
-  window.addEventListener('resize', handleResize);
+  window.addEventListener('resize', handleWindowResize);
+  refreshCanvasOffset();
   handleResize();
   clock = new THREE.Clock();
   clock.stop();
@@ -188,17 +314,34 @@ function handleResize() {
   if (state.trajectoryMaterial) state.trajectoryMaterial.resolution.set(w, h);
 }
 
-function applyCameraPreset(name) {
-  const preset = (cameraPresets && cameraPresets[name]) || cameraPresets?.catcher ||
-                 (name==='if_high' ? {pos:[0,-120,55],lookAt:[0,140,10]} :
-                  name==='cf_stand'? {pos:[0,420,70], lookAt:[0,200,10]} :
-                  name==='lf_stand'? {pos:[-260,180,50],lookAt:[0,200,10]} :
-                  name==='rf_stand'? {pos:[260,180,50], lookAt:[0,200,10]} :
-                                     {pos:[-5,-20,6],  lookAt:[0,60,6]});
+function handleWindowResize() {
+  refreshCanvasOffset();
+  handleResize();
+}
+
+function applyCameraPreset(name, options = {}) {
+  const mode = options.mode || state.cameraMode;
+  const preset = getCameraPreset(name, mode);
+  if (!preset) return;
+  if (options.mode) {
+    state.cameraMode = mode;
+  }
+  state.lastPresetByMode[mode] = name;
   state.lastPreset = name;
   camera.position.set(...preset.pos);
   controls.target.set(...preset.lookAt);
   controls.update();
+  const select = $('selCameraMode');
+  if (select && select.value !== state.cameraMode) {
+    select.value = state.cameraMode;
+  }
+}
+
+function setCameraMode(mode) {
+  if (!mode || !cameraPresets || !cameraPresets[mode]) return;
+  if (mode === state.cameraMode) return;
+  const presetName = state.lastPresetByMode[mode] || 'catcher';
+  applyCameraPreset(presetName, {mode});
 }
 
 function updateOverlay(play) {
@@ -206,27 +349,37 @@ function updateOverlay(play) {
   $('ovOuts'  ).textContent = `Outs: ${play.outs_when_up ?? '-'}`;
   $('ovBatter').textContent = `Batter: ${play.batter ?? '-'}`;
   $('ovEvent' ).textContent = `Event: ${play.event ?? '-'}`;
+  $('ovDate'  ).textContent = `Date: ${play.game_date ?? '-'}`;
+  $('ovBatTeam').textContent = `Bat Team: ${play.bat_team ?? '-'}`;
+  $('ovOppTeam').textContent = `Opp Team: ${play.opp_team ?? '-'}`;
+  refreshCanvasOffset();
 }
 
 function setupTrajectory(play) {
-  if (state.trajectoryLine) {
-    scene.remove(state.trajectoryLine);
-    state.trajectoryLine.geometry?.dispose?.();
-    state.trajectoryMaterial?.dispose?.();
-    state.trajectoryLine = null;
-    state.trajectoryMaterial = null;
-  }
+  clearTrajectory();
   const lineWidth = theme.trajectory?.line_width || 4;
   const color = new THREE.Color(theme.trajectory?.color || '#E03C31');
   const geometry = new LineGeometry();
   const positions = [];
   play.points.forEach(p => { positions.push(p.x, p.y, p.z); });
   geometry.setPositions(positions);
-  const material = new LineMaterial({ color, linewidth: lineWidth, transparent: false, worldUnits: false });
+  const material = new LineMaterial({ color, linewidth: lineWidth, transparent: true, worldUnits: false });
+  material.opacity = theme.trajectory?.base_opacity ?? 0.35;
   material.resolution.set(renderer.domElement.clientWidth, renderer.domElement.clientHeight);
   const line = new Line2(geometry, material);
   line.computeLineDistances();
   scene.add(line);
+
+  const sourcePositions = new Float32Array(positions);
+  const progressGeometry = new THREE.BufferGeometry();
+  const progressPositions = new Float32Array(sourcePositions.length);
+  const progressAttribute = new THREE.BufferAttribute(progressPositions, 3);
+  progressAttribute.setUsage(THREE.DynamicDrawUsage);
+  progressGeometry.setAttribute('position', progressAttribute);
+  progressGeometry.setDrawRange(0, 0);
+  const progressMaterial = new THREE.LineBasicMaterial({color, transparent: true, opacity: 0.95});
+  const progressLine = new THREE.Line(progressGeometry, progressMaterial);
+  scene.add(progressLine);
 
   state.trajectoryLine = line;
   state.trajectoryMaterial = material;
@@ -234,9 +387,19 @@ function setupTrajectory(play) {
   state.duration = play.points.at(-1).t ?? (play.points.length / 60);
   state.time = 0;
   state.segmentIndex = 0;
+  state.progress = {
+    line: progressLine,
+    geometry: progressGeometry,
+    material: progressMaterial,
+    sourcePositions,
+    drawPositions: progressPositions,
+    totalPoints: play.points.length,
+    lastDrawn: 0,
+  };
 
   updateBallPosition(0);
-  clock?.start();
+  updateTrajectoryProgress(0);
+  clock?.stop();
 }
 
 function sampleTrajectory(points, t) {
@@ -261,8 +424,49 @@ function updateBallPosition(time) {
   if (state.followBall) controls.target.copy(ball.position);
 }
 
+function clearTrajectory() {
+  if (state.trajectoryLine) {
+    scene.remove(state.trajectoryLine);
+    state.trajectoryLine.geometry?.dispose?.();
+    state.trajectoryMaterial?.dispose?.();
+    state.trajectoryLine = null;
+    state.trajectoryMaterial = null;
+  }
+  if (state.progress) {
+    if (state.progress.line) scene.remove(state.progress.line);
+    state.progress.geometry?.dispose?.();
+    state.progress.material?.dispose?.();
+    state.progress = null;
+  }
+  state.trajectory = null;
+}
+
+function updateTrajectoryProgress(time) {
+  const progress = state.progress;
+  if (!progress || !state.trajectory) return;
+  if (progress.totalPoints < 2) return;
+  const duration = state.duration || (state.trajectory.length / 60);
+  const clamped = duration > 0 ? Math.min(Math.max(time, 0), duration) : time;
+  const segments = progress.totalPoints - 1;
+  let pointsToShow = segments > 0 && duration > 0 ? Math.floor((clamped / duration) * segments) + 1 : progress.totalPoints;
+  pointsToShow = Math.min(progress.totalPoints, Math.max(2, pointsToShow));
+  if (progress.lastDrawn === pointsToShow) return;
+  const source = progress.sourcePositions;
+  const target = progress.drawPositions;
+  const drawLength = pointsToShow * 3;
+  if (pointsToShow === 2 && clamped <= 0) {
+    target.set(source.subarray(0, 3));
+    target.set(source.subarray(0, 3), 3);
+  } else {
+    target.set(source.subarray(0, drawLength));
+  }
+  progress.geometry.setDrawRange(0, pointsToShow);
+  progress.geometry.attributes.position.needsUpdate = true;
+  progress.lastDrawn = pointsToShow;
+}
+
 function attachUI() {
-  $('btnStart').addEventListener('click', () => setPlay(0));
+  $('btnStart').addEventListener('click', () => setPlay(0, {autoplay: true}));
   $('btnPrev').addEventListener('click', () => setPlay(Math.max(0, state.currentIndex - 1)));
   $('btnNext').addEventListener('click', () => setPlay(Math.min(state.plays.length - 1, state.currentIndex + 1)));
   $('btnPlayPause').addEventListener('click', () => togglePlay());
@@ -275,28 +479,113 @@ function attachUI() {
     state.followBall = e.target.checked;
     if (state.followBall) controls.target.copy(ball.position);
     else {
-      const preset = cameraPresets[state.lastPreset] || cameraPresets.catcher;
+      const presetName = state.lastPresetByMode[state.cameraMode] || 'catcher';
+      const preset = getCameraPreset(presetName);
       if (preset) controls.target.set(...preset.lookAt);
     }
     controls.update();
   });
+  const modeSelect = $('selCameraMode');
+  if (modeSelect) {
+    modeSelect.addEventListener('change', (e) => setCameraMode(e.target.value));
+  }
+  const fileInput = $('csvFile');
+  const csvButton = $('btnCsvSelect');
+  const dropZone = $('csvDropZone');
+  if (csvButton && fileInput) {
+    csvButton.addEventListener('click', () => fileInput.click());
+  }
+  if (fileInput) {
+    fileInput.addEventListener('change', (e) => {
+      handleCsvFiles(e.target.files);
+      e.target.value = '';
+    });
+  }
+  if (dropZone) {
+    const openPicker = () => fileInput?.click();
+    dropZone.addEventListener('click', openPicker);
+    dropZone.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openPicker();
+      }
+    });
+    const activate = (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    };
+    const deactivate = (e) => {
+      e.preventDefault();
+      if (e.target === dropZone) dropZone.classList.remove('dragover');
+    };
+    dropZone.addEventListener('dragover', activate);
+    dropZone.addEventListener('dragenter', activate);
+    dropZone.addEventListener('dragleave', deactivate);
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      const files = e.dataTransfer?.files;
+      if (files?.length) handleCsvFiles(files);
+    });
+  }
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', (e) => {
+    if (!dropZone || dropZone.contains(e.target)) return;
+    e.preventDefault();
+  });
+  refreshCanvasOffset();
+  setStatus('Drop or select a Statcast CSV to preview plays in-browser.', 'info', 6000);
 }
 
 function togglePlay(force) {
   const desired = typeof force === 'boolean' ? force : !state.playing;
+  if (desired && state.trajectory && state.time >= state.duration) {
+    state.time = 0;
+    state.segmentIndex = 0;
+    updateBallPosition(0);
+    updateTrajectoryProgress(0);
+  }
   state.playing = desired;
-  if (state.playing) clock?.start(); else clock?.stop();
+  if (state.playing) {
+    clock?.start();
+    clock?.getDelta();
+  } else {
+    clock?.stop();
+  }
   $('btnPlayPause').textContent = state.playing ? 'Pause' : 'Play';
 }
 
-function setPlay(index) {
+async function handleCsvFiles(fileList) {
+  if (!fileList || !fileList.length) return;
+  const file = fileList[0];
+  try {
+    setStatus(`Parsing "${file.name}"…`, 'info', 0);
+    const plays = await loadPlaysFromCsv(file);
+    if (!plays.length) {
+      setStatus(`No playable rows found in ${file.name}`, 'error');
+      return;
+    }
+    state.plays = plays.map(normalizePlay);
+    state.currentIndex = 0;
+    setPlay(0);
+    setStatus(`Loaded ${plays.length} plays from CSV (${file.name})`, 'success');
+  } catch (err) {
+    console.error('Failed to load CSV', err);
+    const message = err && err.message ? err.message : String(err || 'unknown error');
+    setStatus(`Failed to load CSV: ${message}`, 'error', 8000);
+  }
+}
+
+function setPlay(index, options = {}) {
   index = Math.max(0, Math.min(state.plays.length - 1, index));
   state.currentIndex = index;
   const play = state.plays[index];
   if (!play) return;
   updateOverlay(play);
   setupTrajectory(play);
+  const autoplay = Boolean(options.autoplay);
   togglePlay(false);
+  if (autoplay) togglePlay(true);
 }
 
 function animate() {
@@ -308,11 +597,12 @@ function animate() {
       state.time = state.duration;
       togglePlay(false);
       if (state.autoAdvance && state.currentIndex < state.plays.length - 1) {
-        setTimeout(() => setPlay(state.currentIndex + 1), 600);
+        setTimeout(() => setPlay(state.currentIndex + 1, {autoplay: true}), 600);
       }
     }
     updateBallPosition(state.time);
   }
+  updateTrajectoryProgress(state.time);
   controls.update();
   renderer.render(scene, camera);
 }
@@ -326,7 +616,4 @@ async function init() {
   animate();
 }
 init().catch(err => console.error('Failed to initialise viewer', err));
-
-
-init().catch((err) => console.error('Failed to initialise viewer', err));
 
