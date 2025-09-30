@@ -7,7 +7,11 @@ import {LineMaterial} from 'three/addons/lines/LineMaterial.js';
 import {loadPlaysFromCsv} from './physics-lite.js';
 
 const DEFAULT_TRAJECTORY_COLOR = '#2563EB';
-const DEFAULT_BALL_COLOR = '#2563EB';
+const DEFAULT_ANIMATION_SPEED_FT_PER_SEC = 150;
+const EASING_FUNCTIONS = {
+  linear: (t) => t,
+  inoutcubic: (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2),
+};
 const DEFAULT_APPROACH_CONFIG = {
   nearBehavior: 'stop',
   stopDistance: 14,
@@ -23,6 +27,7 @@ const PAN_SPEED = 6;
 const tmpVecA = new THREE.Vector3();
 const tmpVecB = new THREE.Vector3();
 const tmpVecC = new THREE.Vector3();
+const lineTip = new THREE.Vector3();
 
 const $ = (id) => document.getElementById(id);
 
@@ -32,21 +37,20 @@ const state = {
   playing: false,
   autoAdvance: false,
   followBall: false,
-  speed: 1,
+  speedFactor: 1,
   trajectory: null,          // [{t,x,y,z}, ...]
   trajectoryMaterial: null,
   trajectoryLine: null,
-  trajectoryGuideLine: null,
-  trajectoryGuideMaterial: null,
   duration: 0,
-  time: 0,
+  elapsed: 0,
   currentPointIndex: 0,
-  progress: null,
+  visiblePoints: 0,
+  ease: (t) => t,
+  finished: false,
   cameraMode: 'infield',
   lastPresetByMode: {infield: 'catcher', outfield: 'cf_stand'},
   lastPreset: 'catcher',
   statusTimer: null,
-  showTrajectory: false,
   approachConfig: {...DEFAULT_APPROACH_CONFIG},
   viewAdjust: {
     yawDir: 0,
@@ -56,7 +60,7 @@ const state = {
   },
 };
 
-let renderer, scene, camera, controls, ball, theme, cameraPresets, clock;
+let renderer, scene, camera, controls, theme, cameraPresets, clock;
 let adjustLastTime = null;
 const activeKeyAdjust = new Set();
 let ballparkBounds = null;
@@ -402,6 +406,53 @@ function ensureMonotonicTimes(points) {
   return points;
 }
 
+function sortPlaysChrono(plays) {
+  const halfRank = (tb) => (String(tb).toLowerCase().startsWith('top') ? 0 : 1);
+  const parseSeq = (pid) => {
+    const m = String(pid || '').match(/-(\d+)$/);
+    return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+  };
+  return [...plays].sort((a, b) => (
+    (Number(a.inning) || 0) - (Number(b.inning) || 0)
+    || (halfRank(a.topbot ?? a.inning_half) - halfRank(b.topbot ?? b.inning_half))
+    || (parseSeq(a.play_id) - parseSeq(b.play_id))
+  ));
+}
+
+function getAnimationSpeed() {
+  const themeSpeed = Number(theme?.animation?.ft_per_sec);
+  if (Number.isFinite(themeSpeed) && themeSpeed > 0) return themeSpeed;
+  return DEFAULT_ANIMATION_SPEED_FT_PER_SEC;
+}
+
+function computeDistanceDuration(points, speed) {
+  if (!Array.isArray(points) || points.length < 2) return 0;
+  let distance = 0;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    const ax = Number(a.x) || 0;
+    const ay = Number(a.y) || 0;
+    const az = Number(a.z) || 0;
+    const bx = Number(b.x) || 0;
+    const by = Number(b.y) || 0;
+    const bz = Number(b.z) || 0;
+    distance += Math.hypot(bx - ax, by - ay, bz - az);
+  }
+  if (!Number.isFinite(distance) || distance <= 0 || !Number.isFinite(speed) || speed <= 0) return 0;
+  return distance / speed;
+}
+
+function computeTotalDuration(points) {
+  if (!Array.isArray(points) || points.length < 2) return 0;
+  const last = points[points.length - 1];
+  const lastTime = Number(last?.t);
+  if (Number.isFinite(lastTime) && lastTime > 0) return lastTime;
+  const distDuration = computeDistanceDuration(points, getAnimationSpeed());
+  if (distDuration > 0) return distDuration;
+  return Math.max((points.length - 1) / 60, 1);
+}
+
 // ---------- data load ----------
 async function loadData() {
   const [config, playlist] = await Promise.all([
@@ -425,7 +476,7 @@ async function loadData() {
     const points  = normalizeTrajectory(trajRaw);
     plays.push({...p, points});
   }
-  state.plays = plays;
+  state.plays = sortPlaysChrono(plays);
   return config.ballpark; // なくても fallback で描く
 }
 
@@ -465,19 +516,6 @@ function setupScene(ballpark) {
   controls.minDistance = 60;
   controls.maxDistance = 2500;
   controls.update();
-
-  const ballColor = theme.trajectory?.ball_color || theme.trajectory?.color || DEFAULT_BALL_COLOR;
-  const ballRadius = theme.trajectory?.ball_radius ?? 1.5;
-  const ballMaterial = new THREE.MeshBasicMaterial({color: ballColor});
-  if (state.approachConfig.nearBehavior === 'fade') {
-    ballMaterial.transparent = true;
-    ballMaterial.opacity = 1;
-  }
-  ball = new THREE.Mesh(new THREE.SphereGeometry(ballRadius, 32, 32), ballMaterial);
-  ball.visible = false;
-  ball.userData.baseOpacity = ballMaterial.opacity;
-  scene.add(ball);
-  resetBallAppearance();
 
   resetBallparkBounds();
   addBallparkWireframe(ballpark);   // ワイヤーフレーム
@@ -633,7 +671,7 @@ function frameBallpark(options = {}) {
     dir.normalize();
   }
   camera.position.copy(center).addScaledVector(dir, need);
-  const target = (state.followBall && ball) ? ball.position : center;
+  const target = (state.followBall && hasTrajectoryTip()) ? lineTip : center;
   controls.target.copy(target);
   camera.updateProjectionMatrix();
   controls.update();
@@ -646,7 +684,6 @@ function handleResize() {
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   if (state.trajectoryMaterial) state.trajectoryMaterial.resolution.set(w, h);
-  if (state.trajectoryGuideMaterial) state.trajectoryGuideMaterial.resolution.set(w, h);
 }
 
 function handleWindowResize() {
@@ -667,8 +704,8 @@ function applyCameraPreset(name, options = {}) {
   state.lastPresetByMode[mode] = name;
   state.lastPreset = name;
   camera.position.set(...preset.pos);
-  if (state.followBall && ball) {
-    controls.target.copy(ball.position);
+  if (state.followBall && hasTrajectoryTip()) {
+    controls.target.copy(lineTip);
   } else {
     controls.target.set(...preset.lookAt);
   }
@@ -690,14 +727,14 @@ function setCameraMode(mode) {
   applyCameraPreset(presetName, {mode});
 }
 
-function updateOverlay(play) {
-  $('ovInning').textContent = `Inning: ${play.inning ?? '-'} ${play.topbot ?? '-'}`;
-  $('ovOuts'  ).textContent = `Outs: ${play.outs_when_up ?? '-'}`;
-  $('ovBatter').textContent = `Batter: ${play.batter ?? '-'}`;
-  $('ovEvent' ).textContent = `Event: ${play.event ?? '-'}`;
-  $('ovDate'  ).textContent = `Date: ${play.game_date ?? '-'}`;
-  $('ovBatTeam').textContent = `Bat Team: ${play.bat_team ?? '-'}`;
-  $('ovOppTeam').textContent = `Opp Team: ${play.opp_team ?? '-'}`;
+function updateOverlay(info) {
+  $('ovInning').textContent = `Inning: ${info.inning ?? '-'} ${info.topbot ?? '-'}`;
+  $('ovOuts'  ).textContent = `Outs: ${info.outs ?? '-'}`;
+  $('ovBatter').textContent = `Batter: ${info.batter ?? '-'}`;
+  $('ovEvent' ).textContent = `Event: ${info.event ?? '-'}`;
+  $('ovDate'  ).textContent = `Date: ${info.date ?? '-'}`;
+  $('ovBatTeam').textContent = `Bat Team: ${info.bat ?? '-'}`;
+  $('ovOppTeam').textContent = `Opp Team: ${info.opp ?? '-'}`;
   refreshCanvasOffset();
 }
 
@@ -715,85 +752,31 @@ function setupTrajectory(play) {
   });
   geometry.setPositions(positions);
   geometry.setDrawRange(0, 0);
-  const material = new LineMaterial({ color, linewidth: lineWidth, transparent: true, worldUnits: false });
+  const material = new LineMaterial({color, linewidth: lineWidth, transparent: true, worldUnits: false});
   material.opacity = theme.trajectory?.base_opacity ?? 0.95;
   material.resolution.set(renderer.domElement.clientWidth, renderer.domElement.clientHeight);
   const line = new Line2(geometry, material);
   line.computeLineDistances();
-  line.visible = state.showTrajectory;
+  line.visible = false;
   scene.add(line);
-
-  let guideLine = null;
-  let guideMaterial = null;
-  const fullPathOpacity = Number(theme.trajectory?.full_path_opacity ?? 0);
-  if (fullPathOpacity > 0) {
-    const guideGeometry = new LineGeometry();
-    guideGeometry.setPositions(positions);
-    const gm = new LineMaterial({color, linewidth: lineWidth, transparent: true, worldUnits: false});
-    gm.opacity = fullPathOpacity;
-    gm.resolution.set(renderer.domElement.clientWidth, renderer.domElement.clientHeight);
-    guideMaterial = gm;
-    guideLine = new Line2(guideGeometry, gm);
-    guideLine.computeLineDistances();
-    guideLine.visible = true;
-    scene.add(guideLine);
-  }
 
   state.trajectoryLine = line;
   state.trajectoryMaterial = material;
-  state.trajectoryGuideLine = guideLine;
-  state.trajectoryGuideMaterial = guideMaterial;
   state.trajectory = play.points;
-  const lastPoint = play.points.at(-1);
-  const lastTime = lastPoint != null ? Number(lastPoint.t) : null;
-  state.duration = Number.isFinite(lastTime) ? lastTime : (play.points.length / 60);
-  state.time = 0;
-  state.showTrajectory = false;
-  if (ball) ball.visible = false;
-  if (state.trajectoryLine) state.trajectoryLine.visible = false;
-  state.progress = {
-    geometry,
-    pointCount: play.points.length,
-    lastDrawCount: -1,
-    lastIndex: -1,
-  };
-
+  state.duration = computeTotalDuration(play.points);
+  state.elapsed = 0;
   state.currentPointIndex = 0;
-  updateBallPosition(0);
-  updateTrajectoryProgress(0);
-  clock?.stop();
-}
-
-function timeToIndex(points, time) {
-  if (!Array.isArray(points) || points.length === 0) return 0;
-  const n = points.length;
-  if (!Number.isFinite(time) || time <= (points[0].t ?? 0)) return 0;
-  const lastTime = points[n - 1].t ?? 0;
-  if (time >= lastTime) return n - 1;
-  let lo = 0;
-  let hi = n - 1;
-  while (lo + 1 < hi) {
-    const mid = (lo + hi) >> 1;
-    const mt = points[mid].t ?? 0;
-    if (time >= mt) lo = mid;
-    else hi = mid;
+  state.visiblePoints = 0;
+  state.finished = false;
+  lineTip.set(0, 0, 0);
+  const easeName = String(theme?.animation?.ease || 'linear').toLowerCase();
+  state.ease = EASING_FUNCTIONS[easeName] || EASING_FUNCTIONS.linear;
+  if (play.points.length) {
+    const first = play.points[0];
+    lineTip.set(Number(first.x) || 0, Number(first.y) || 0, Number(first.z) || 0);
   }
-  return lo;
-}
-
-function updateBallPosition(time) {
-  if (!state.trajectory || !ball) return;
-  const points = state.trajectory;
-  const idx = timeToIndex(points, time);
-  const p = points[idx] || points[0];
-  state.currentPointIndex = idx;
-  const px = Number(p.x);
-  const py = Number(p.y);
-  const pz = Number(p.z);
-  tmpVecB.set(Number.isFinite(px) ? px : 0, Number.isFinite(py) ? py : 0, Number.isFinite(pz) ? pz : 0);
-  applyApproachAdjustments(tmpVecB);
-  ball.position.copy(tmpVecB);
-  if (state.followBall) controls.target.copy(ball.position);
+  updateFollowTarget(true);
+  clock?.stop();
 }
 
 function clearTrajectory() {
@@ -804,147 +787,119 @@ function clearTrajectory() {
     state.trajectoryLine = null;
     state.trajectoryMaterial = null;
   }
-  if (state.trajectoryGuideLine) {
-    scene.remove(state.trajectoryGuideLine);
-    state.trajectoryGuideLine.geometry?.dispose?.();
-    state.trajectoryGuideMaterial?.dispose?.();
-    state.trajectoryGuideLine = null;
-    state.trajectoryGuideMaterial = null;
-  }
-  state.progress = null;
   state.trajectory = null;
-  state.showTrajectory = false;
+  state.duration = 0;
+  state.elapsed = 0;
   state.currentPointIndex = 0;
-  if (ball) ball.visible = false;
+  state.visiblePoints = 0;
+  state.finished = false;
 }
 
-function getLineDelaySegments() {
-  const raw = theme?.animation?.line_delay_segments;
-  if (!Number.isFinite(raw)) return 0;
-  return Math.max(0, Math.floor(raw));
+function hasTrajectoryTip() {
+  return Array.isArray(state.trajectory) && state.trajectory.length > 0;
 }
 
-function updateTrajectoryProgress(time) {
-  const progress = state.progress;
-  const points = state.trajectory;
-  if (!progress || !points) return;
-  const pointCount = progress.pointCount || points.length;
-  if (!Number.isFinite(pointCount) || pointCount < 2) {
-    progress.geometry.setDrawRange(0, 0);
-    progress.lastDrawCount = 0;
-    if (state.trajectoryLine) state.trajectoryLine.visible = false;
+function updateLineTipFromIndex(index) {
+  if (!hasTrajectoryTip()) return;
+  const maxIndex = state.trajectory.length - 1;
+  const clamped = Math.max(0, Math.min(index, maxIndex));
+  const point = state.trajectory[clamped] || state.trajectory[0];
+  const x = Number(point?.x) || 0;
+  const y = Number(point?.y) || 0;
+  const z = Number(point?.z) || 0;
+  lineTip.set(x, y, z);
+  state.currentPointIndex = clamped;
+}
+
+function setDrawCount(count) {
+  if (!state.trajectoryLine) return;
+  const total = hasTrajectoryTip() ? state.trajectory.length : 0;
+  const clamped = Math.max(0, Math.min(count, total));
+  state.visiblePoints = clamped;
+  state.trajectoryLine.geometry?.setDrawRange(0, clamped);
+  const shouldShow = clamped >= 2 || (total <= 1 && clamped > 0);
+  state.trajectoryLine.visible = shouldShow;
+  if (clamped > 0) updateLineTipFromIndex(clamped - 1);
+}
+
+function updateFollowTarget(force = false) {
+  if (!controls) return;
+  if (!state.followBall) return;
+  if (!hasTrajectoryTip()) return;
+  if (!force && state.visiblePoints <= 0) return;
+  controls.target.copy(lineTip);
+  controls.update();
+}
+
+function restartCurrentPlay() {
+  state.elapsed = 0;
+  state.finished = false;
+  if (!state.trajectoryLine) return;
+  const total = hasTrajectoryTip() ? state.trajectory.length : 0;
+  if (total <= 0) {
+    setDrawCount(0);
+    state.trajectoryLine.visible = false;
     return;
   }
-  if (!state.showTrajectory) {
-    progress.geometry.setDrawRange(0, 0);
-    progress.lastDrawCount = 0;
-    if (state.trajectoryLine) state.trajectoryLine.visible = false;
-    return;
+  const initial = total >= 2 ? 2 : total;
+  setDrawCount(initial);
+  updateFollowTarget(true);
+  if (state.duration <= 0 && total > 0) {
+    // Fall back to instant finish if duration is zero.
+    setDrawCount(total);
+    state.elapsed = state.duration;
+    state.finished = true;
   }
-  let idx = timeToIndex(points, time);
-  if (!Number.isFinite(idx)) idx = 0;
-  if (idx < 0) idx = 0;
-  if (idx >= points.length) idx = points.length - 1;
-  state.currentPointIndex = idx;
-  const delay = getLineDelaySegments();
-  const rawVisible = Math.min(pointCount, idx + 1 - delay);
-  let drawCount;
-  if (rawVisible <= 0) {
-    drawCount = Math.min(pointCount, pointCount >= 2 ? 2 : 0);
-  } else {
-    drawCount = Math.max(2, rawVisible);
-  }
-  drawCount = Math.min(pointCount, Math.max(0, Math.floor(drawCount)));
-  if (progress.lastDrawCount === drawCount && progress.lastIndex === idx) {
-    if (state.trajectoryLine) state.trajectoryLine.visible = state.showTrajectory && drawCount >= 2;
-    return;
-  }
-  progress.geometry.setDrawRange(0, drawCount);
-  progress.lastDrawCount = drawCount;
-  progress.lastIndex = idx;
-  if (state.trajectoryLine) state.trajectoryLine.visible = state.showTrajectory && drawCount >= 2;
 }
 
-function resetBallAppearance() {
-  if (!ball) return;
-  const mat = ball.material;
-  if (!mat) return;
-  const baseOpacity = ball.userData?.baseOpacity ?? 1;
-  let needsUpdate = false;
-  if (state.approachConfig.nearBehavior === 'fade') {
-    if (!mat.transparent) { mat.transparent = true; needsUpdate = true; }
-  } else if (mat.transparent) {
-    mat.transparent = false;
-    needsUpdate = true;
+function finishPlayback() {
+  if (state.finished) return;
+  state.finished = true;
+  state.playing = false;
+  clock?.stop();
+  $('btnPlayPause').textContent = 'Play';
+  updateFollowTarget();
+  if (state.autoAdvance && state.currentIndex < state.plays.length - 1) {
+    setTimeout(() => setPlay(state.currentIndex + 1, {autoplay: true}), 400);
   }
-  if (Math.abs((mat.opacity ?? 1) - baseOpacity) > 0.01) {
-    mat.opacity = baseOpacity;
-    needsUpdate = true;
-  }
-  if (needsUpdate) mat.needsUpdate = true;
-  ball.scale.set(1, 1, 1);
 }
 
-function applyApproachAdjustments(position) {
-  if (!camera || !controls) return position;
-  const config = state.approachConfig || DEFAULT_APPROACH_CONFIG;
-  if (state.cameraMode !== 'outfield') {
-    resetBallAppearance();
-    return position;
+function advanceLineAnimation(delta) {
+  if (!state.playing) return;
+  if (!hasTrajectoryTip() || !state.trajectoryLine) return;
+  const total = state.trajectory.length;
+  if (total <= 0) {
+    finishPlayback();
+    return;
   }
-
-  const behavior = config.nearBehavior || 'stop';
-  const camPos = camera.position;
-  const dist = position.distanceTo(camPos);
-
-  if (behavior === 'fade') {
-    const fadeStart = Math.max(Number(config.fadeStart) || DEFAULT_APPROACH_CONFIG.fadeStart, 1);
-    const fadeEndRaw = Number(config.fadeEnd) || DEFAULT_APPROACH_CONFIG.fadeEnd;
-    const fadeEnd = Math.max(0.5, Math.min(fadeStart - 0.5, fadeEndRaw));
-    let opacity = 1;
-    if (dist <= fadeEnd) {
-      opacity = 0.12;
-    } else if (dist < fadeStart) {
-      const t = (dist - fadeEnd) / Math.max(fadeStart - fadeEnd, 1);
-      opacity = 0.12 + Math.max(0, Math.min(1, t)) * 0.88;
-    }
-    const mat = ball.material;
-    if (mat) {
-      if (!mat.transparent) { mat.transparent = true; mat.needsUpdate = true; }
-      const clamped = Math.max(0.12, Math.min(1, opacity));
-      if (Math.abs((mat.opacity ?? 1) - clamped) > 0.01) {
-        mat.opacity = clamped;
-        mat.needsUpdate = true;
-      }
-    }
-  } else {
-    resetBallAppearance();
+  if (total === 1) {
+    setDrawCount(1);
+    state.elapsed = state.duration;
+    finishPlayback();
+    return;
   }
-
-  if (behavior === 'stop') {
-    const minDist = Math.max(2, Number(config.stopDistance) || DEFAULT_APPROACH_CONFIG.stopDistance);
-    if (dist < minDist) {
-      tmpVecC.copy(position).sub(camPos);
-      if (tmpVecC.lengthSq() > 1e-6) {
-        tmpVecC.setLength(minDist);
-        position.copy(camPos).add(tmpVecC);
-      }
-    }
-  } else if (behavior === 'dolly') {
-    const minDist = Math.max(4, Number(config.stopDistance) || DEFAULT_APPROACH_CONFIG.stopDistance);
-    if (dist < minDist) {
-      tmpVecC.copy(camera.position).sub(controls.target);
-      if (tmpVecC.lengthSq() > 1e-6) {
-        const retreatBase = Number(config.dollyRetreat) || DEFAULT_APPROACH_CONFIG.dollyRetreat;
-        const retreat = Math.max(minDist - dist, 0) + Math.max(retreatBase, 0) * 0.02;
-        const newLength = tmpVecC.length() + retreat;
-        tmpVecC.setLength(newLength);
-        camera.position.copy(controls.target).add(tmpVecC);
-      }
-    }
+  const totalDuration = state.duration > 0 ? state.duration : 1;
+  state.elapsed += delta * state.speedFactor;
+  let fraction = state.elapsed / totalDuration;
+  if (!Number.isFinite(fraction)) fraction = 1;
+  fraction = Math.max(0, Math.min(1, fraction));
+  const easedRaw = state.ease ? state.ease(fraction) : fraction;
+  const eased = Math.max(0, Math.min(1, easedRaw));
+  let drawTarget = Math.floor(eased * total);
+  if (drawTarget < 2) drawTarget = 2;
+  if (drawTarget > total) drawTarget = total;
+  if (drawTarget !== state.visiblePoints) {
+    setDrawCount(drawTarget);
+    updateFollowTarget();
+  } else if (state.followBall && state.visiblePoints > 0) {
+    updateLineTipFromIndex(state.visiblePoints - 1);
+    updateFollowTarget();
   }
-
-  return position;
+  if (fraction >= 1) {
+    setDrawCount(total);
+    state.elapsed = state.duration;
+    finishPlayback();
+  }
 }
 
 function resetViewAdjust() {
@@ -1082,7 +1037,10 @@ function attachUI() {
   $('btnNext').addEventListener('click', () => setPlay(Math.min(state.plays.length - 1, state.currentIndex + 1)));
   $('btnPlayPause').addEventListener('click', () => togglePlay());
   $('chkAuto').addEventListener('change', (e) => (state.autoAdvance = e.target.checked));
-  $('selSpeed').addEventListener('change', (e) => (state.speed = parseFloat(e.target.value)));
+  $('selSpeed').addEventListener('change', (e) => {
+    const value = parseFloat(e.target.value);
+    state.speedFactor = Number.isFinite(value) ? value : 1;
+  });
   document.querySelectorAll('[data-view]').forEach((btn) => {
     btn.addEventListener('click', () => applyCameraPreset(btn.dataset.view));
   });
@@ -1097,14 +1055,15 @@ function attachUI() {
   window.addEventListener('blur', () => resetViewAdjust());
   $('chkFollow').addEventListener('change', (e) => {
     state.followBall = e.target.checked;
-    if (state.followBall) controls.target.copy(ball.position);
-    else {
+    if (state.followBall) {
+      updateFollowTarget(true);
+    } else {
       const presetName = state.lastPresetByMode[state.cameraMode] || 'catcher';
       const preset = getCameraPreset(presetName);
       if (preset) controls.target.set(...preset.lookAt);
+      controls.update();
     }
     resetViewAdjust();
-    controls.update();
   });
   const modeSelect = $('selCameraMode');
   if (modeSelect) {
@@ -1160,24 +1119,21 @@ function attachUI() {
 
 function togglePlay(force) {
   const desired = typeof force === 'boolean' ? force : !state.playing;
-  if (desired && state.trajectory && state.time >= state.duration) {
-    state.time = 0;
-    state.currentPointIndex = 0;
-    updateBallPosition(0);
-    updateTrajectoryProgress(0);
+  if (!state.trajectory || !state.trajectoryLine) {
+    state.playing = false;
+    $('btnPlayPause').textContent = 'Play';
+    return;
   }
-  if (desired && state.trajectory) {
-    if (!state.showTrajectory) {
-      state.showTrajectory = true;
-      updateTrajectoryProgress(state.time);
+  if (desired) {
+    if (state.finished || state.visiblePoints === 0 || state.visiblePoints >= state.trajectory.length) {
+      restartCurrentPlay();
     }
-    if (ball) ball.visible = true;
-  }
-  state.playing = desired;
-  if (state.playing) {
+    state.finished = false;
+    state.playing = true;
     clock?.start();
     clock?.getDelta();
   } else {
+    state.playing = false;
     clock?.stop();
   }
   $('btnPlayPause').textContent = state.playing ? 'Pause' : 'Play';
@@ -1193,7 +1149,8 @@ async function handleCsvFiles(fileList) {
       setStatus(`No playable rows found in ${file.name}`, 'error');
       return;
     }
-    state.plays = plays.map(normalizePlay);
+    const normalized = plays.map(normalizePlay);
+    state.plays = sortPlaysChrono(normalized);
     state.currentIndex = 0;
     setPlay(0);
     setStatus(`Loaded ${plays.length} plays from CSV (${file.name})`, 'success');
@@ -1205,32 +1162,35 @@ async function handleCsvFiles(fileList) {
 }
 
 function setPlay(index, options = {}) {
-  index = Math.max(0, Math.min(state.plays.length - 1, index));
-  state.currentIndex = index;
-  const play = state.plays[index];
-  if (!play) return;
-  updateOverlay(play);
-  setupTrajectory(play);
-  const autoplay = Boolean(options.autoplay);
+  if (!state.plays.length) return;
+  const clamped = Math.max(0, Math.min(state.plays.length - 1, index));
   togglePlay(false);
-  if (autoplay) togglePlay(true);
+  state.currentIndex = clamped;
+  const play = state.plays[clamped];
+  if (!play) return;
+  updateOverlay({
+    inning: play.inning,
+    topbot: play.topbot ?? toTopBot(play.inning_half),
+    outs: play.outs_when_up ?? play.outs,
+    batter: play.batter ?? play.player_name,
+    event: play.event ?? play.events,
+    date: play.game_date,
+    bat: play.bat_team,
+    opp: play.opp_team,
+  });
+  setupTrajectory(play);
+  $('btnPlayPause').textContent = 'Play';
+  if (options.autoplay) {
+    togglePlay(true);
+  }
 }
 
 function animate() {
   requestAnimationFrame(animate);
   const delta = state.playing && clock ? clock.getDelta() : 0;
   if (state.playing && state.trajectory) {
-    state.time += state.speed * delta;
-    if (state.time >= state.duration) {
-      state.time = state.duration;
-      togglePlay(false);
-      if (state.autoAdvance && state.currentIndex < state.plays.length - 1) {
-        setTimeout(() => setPlay(state.currentIndex + 1, {autoplay: true}), 600);
-      }
-    }
-    updateBallPosition(state.time);
+    advanceLineAnimation(delta);
   }
-  updateTrajectoryProgress(state.time);
   updateViewAdjust();
   controls.update();
   renderer.render(scene, camera);
