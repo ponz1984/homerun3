@@ -7,7 +7,8 @@ import {LineMaterial} from 'three/addons/lines/LineMaterial.js';
 import {loadPlaysFromCsv} from './physics-lite.js';
 
 const DEFAULT_TRAJECTORY_COLOR = '#2563EB';
-const DEFAULT_ANIMATION_SPEED_FT_PER_SEC = 150;
+const DEFAULT_ANIMATION_DURATION_SECONDS = 4;
+const DEFAULT_ANIMATION_SPEED_FT_PER_SEC = 140;
 const EASING_FUNCTIONS = {
   linear: (t) => t,
   inoutcubic: (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2),
@@ -111,6 +112,46 @@ function clonePreset(preset, fallback) {
     pos: toVec3(preset.pos, base.pos),
     lookAt: toVec3(preset.lookAt, base.lookAt),
   };
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function isTrajectoryData(value) {
+  if (!value) return false;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return true;
+    return value.some((item) => Array.isArray(item) || (item && typeof item === 'object'));
+  }
+  if (typeof value === 'object') {
+    if (Array.isArray(value.points) || Array.isArray(value.samples)) return true;
+    if (Array.isArray(value.t) || Array.isArray(value.x) || Array.isArray(value.y)) return true;
+    if ('x' in value && 'y' in value) return true;
+  }
+  return false;
+}
+
+function extractTrajectorySource(raw) {
+  if (!raw || typeof raw !== 'object') return {path: '', data: null};
+  let path = '';
+  let data = null;
+  const candidates = [raw.trajectory, raw.trajectory_file, raw.points];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (isTrajectoryData(candidate)) {
+      data = candidate;
+      break;
+    }
+    if (!path && typeof candidate === 'string') {
+      path = candidate;
+    }
+  }
+  if (!path && typeof raw.trajectory_path === 'string') {
+    path = raw.trajectory_path;
+  }
+  return {path, data};
 }
 
 function parseApproachConfig(raw) {
@@ -309,6 +350,7 @@ function toTopBot(v) {
 function normalizePlay(p) {
   const rawHalf = p.inning_half ?? p.topbot;
   const half = rawHalf ? toTopBot(rawHalf) : '';
+  const {path, data} = extractTrajectorySource(p);
   return {
     ...p,
     batter:       p.batter ?? p.player_name ?? '',
@@ -319,70 +361,183 @@ function normalizePlay(p) {
     bat_team:     p.bat_team ?? '',
     opp_team:     p.opp_team ?? '',
     game_date:    p.game_date ?? '',
-    trajectory_path: p.trajectory ?? p.trajectory_file ?? '',
+    trajectory_path: typeof path === 'string' ? path : '',
+    trajectory_data: data ?? null,
   };
 }
 // 軌道JSONを [{t,x,y,z}, …] に正規化
-function normalizeTrajectory(traj) {
-  if (!traj) return [];
-  let points = [];
-  // {points: [{t,x,y,z}, ...]}
-  if (Array.isArray(traj.points)) {
-    points = traj.points.map((p, idx) => {
-      const t = Number(p?.t);
-      return {
-        t: Number.isFinite(t) ? t : idx / 60,
-        x: p?.x,
-        y: p?.y,
-        z: p?.z ?? 0,
-      };
+function distanceFromHome(point) {
+  if (!point) return 0;
+  const x = Number(point.x) || 0;
+  const y = Number(point.y) || 0;
+  return Math.hypot(x, y);
+}
+
+function computeDirectionMetrics(points) {
+  let sumDelta = 0;
+  let increase = 0;
+  let decrease = 0;
+  for (let i = 1; i < points.length; i++) {
+    const prevDist = distanceFromHome(points[i - 1]);
+    const currDist = distanceFromHome(points[i]);
+    const delta = currDist - prevDist;
+    sumDelta += delta;
+    if (delta >= 0) increase += delta;
+    else decrease += -delta;
+  }
+  return {sumDelta, increase, decrease};
+}
+
+function orientTrajectoryPoints(points) {
+  if (!Array.isArray(points) || points.length < 2) return points;
+  const metrics = computeDirectionMetrics(points);
+  const startDist = distanceFromHome(points[0]);
+  const endDist = distanceFromHome(points[points.length - 1]);
+  let shouldReverse = metrics.sumDelta < 0;
+  if (!shouldReverse && startDist > endDist && metrics.increase <= metrics.decrease) {
+    shouldReverse = true;
+  }
+  if (shouldReverse) points.reverse();
+  return points;
+}
+
+function computeDistanceFractions(points) {
+  if (!Array.isArray(points) || points.length === 0) return [];
+  const cumulative = new Array(points.length).fill(0);
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    const dx = (Number(curr.x) || 0) - (Number(prev.x) || 0);
+    const dy = (Number(curr.y) || 0) - (Number(prev.y) || 0);
+    const dz = (Number(curr.z) || 0) - (Number(prev.z) || 0);
+    const step = Math.hypot(dx, dy, dz);
+    total += step > 0 ? step : 0;
+    cumulative[i] = total;
+  }
+  if (!Number.isFinite(total) || total <= 0) {
+    const denom = Math.max(points.length - 1, 1);
+    return points.map((_, idx) => (denom ? idx / denom : 0));
+  }
+  return cumulative.map((value) => value / total);
+}
+
+function finalizeTrajectoryPoints(points) {
+  const prepared = Array.isArray(points)
+    ? points.filter((p) => p && typeof p === 'object')
+    : [];
+  if (!prepared.length) return [];
+  const finiteTimes = prepared
+    .map((p) => Number(p.t))
+    .filter((t) => Number.isFinite(t));
+  if (finiteTimes.length) {
+    prepared.sort((a, b) => {
+      const ta = Number(a.t);
+      const tb = Number(b.t);
+      const aFinite = Number.isFinite(ta);
+      const bFinite = Number.isFinite(tb);
+      if (aFinite && bFinite) {
+        if (ta !== tb) return ta - tb;
+        return (a.order ?? 0) - (b.order ?? 0);
+      }
+      if (aFinite) return -1;
+      if (bFinite) return 1;
+      return (a.order ?? 0) - (b.order ?? 0);
     });
-    return ensureMonotonicTimes(points);
+  } else {
+    prepared.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   }
-  // {samples: [[t,x,y,z], ...]}
-  if (Array.isArray(traj.samples)) {
-    points = traj.samples.map(([t, x, y, z], idx) => ({
-      t: Number.isFinite(t) ? Number(t) : idx / 60,
-      x,
-      y,
-      z: z ?? 0,
-    }));
-    return ensureMonotonicTimes(points);
-  }
-  // {t:[], x:[], y:[], z:[]}
-  if (Array.isArray(traj.t) && Array.isArray(traj.x) && Array.isArray(traj.y) && Array.isArray(traj.z)) {
-    const n = Math.min(traj.t.length, traj.x.length, traj.y.length, traj.z.length);
-    points = [];
-    for (let i = 0; i < n; i++) {
-      const t = Number(traj.t[i]);
-      points.push({
-        t: Number.isFinite(t) ? t : i / 60,
-        x: traj.x[i],
-        y: traj.y[i],
-        z: traj.z[i] ?? 0,
+  orientTrajectoryPoints(prepared);
+  if (finiteTimes.length >= 2) {
+    const minTime = Math.min(...finiteTimes);
+    const maxTime = Math.max(...finiteTimes);
+    const duration = Math.max(maxTime - minTime, 0);
+    if (duration > 0) {
+      const fractions = computeDistanceFractions(prepared);
+      prepared.forEach((p, idx) => {
+        p.t = fractions[idx] * duration;
       });
     }
-    return ensureMonotonicTimes(points);
   }
-  // [[x,y,z]] or [[t,x,y,z]]
-  if (Array.isArray(traj) && Array.isArray(traj[0])) {
-    points = traj.map((a, idx) => (a.length === 4
-      ? ({t: Number.isFinite(a[0]) ? Number(a[0]) : idx / 60, x: a[1], y: a[2], z: a[3] ?? 0})
-      : ({t: idx / 60, x: a[0], y: a[1], z: a[2] ?? 0})));
-    return ensureMonotonicTimes(points);
-  }
-  // ★ 配列の中がオブジェクト [{x:..,y:..,z:..,t?}, ...] に対応
-  if (Array.isArray(traj) && typeof traj[0] === 'object' && traj[0] !== null && 'x' in traj[0] && 'y' in traj[0]) {
-    points = traj.map((p, idx) => {
-      const t = 't' in p ? Number(p.t) : idx / 60;
-      return {
-        t: Number.isFinite(t) ? t : idx / 60,
-        x: p.x,
-        y: p.y,
-        z: ('z' in p ? p.z : 0),
-      };
+  prepared.forEach((p) => {
+    if ('order' in p) delete p.order;
+  });
+  return ensureMonotonicTimes(prepared);
+}
+
+function normalizeTrajectory(traj) {
+  if (!traj) return [];
+  const points = [];
+  const addPoint = (x, y, z, t, order) => {
+    points.push({
+      x: toFiniteNumber(x, 0),
+      y: toFiniteNumber(y, 0),
+      z: toFiniteNumber(z, 0),
+      t: Number.isFinite(Number(t)) ? Number(t) : NaN,
+      order: Number.isFinite(order) ? order : points.length,
     });
-    return ensureMonotonicTimes(points);
+  };
+
+  if (Array.isArray(traj.points)) {
+    traj.points.forEach((p, idx) => {
+      if (!p) return;
+      if (Array.isArray(p)) {
+        const [t, x, y, z] = p;
+        if (p.length === 4) addPoint(x, y, z, t, idx);
+        else addPoint(p[0], p[1], p[2], idx / 60, idx);
+        return;
+      }
+      addPoint(p.x, p.y, p.z, p.t, idx);
+    });
+    return finalizeTrajectoryPoints(points);
+  }
+  if (Array.isArray(traj.samples)) {
+    traj.samples.forEach((sample, idx) => {
+      if (!Array.isArray(sample)) return;
+      if (sample.length === 4) {
+        const [t, x, y, z] = sample;
+        addPoint(x, y, z, t, idx);
+      } else if (sample.length >= 3) {
+        addPoint(sample[0], sample[1], sample[2], idx / 60, idx);
+      }
+    });
+    return finalizeTrajectoryPoints(points);
+  }
+  if (Array.isArray(traj.t) && Array.isArray(traj.x) && Array.isArray(traj.y) && Array.isArray(traj.z)) {
+    const n = Math.min(traj.t.length, traj.x.length, traj.y.length, traj.z.length);
+    for (let i = 0; i < n; i++) {
+      addPoint(traj.x[i], traj.y[i], traj.z[i], traj.t[i], i);
+    }
+    return finalizeTrajectoryPoints(points);
+  }
+  if (Array.isArray(traj) && Array.isArray(traj[0])) {
+    traj.forEach((row, idx) => {
+      if (!Array.isArray(row)) return;
+      if (row.length === 4) {
+        const [t, x, y, z] = row;
+        addPoint(x, y, z, t, idx);
+      } else if (row.length >= 3) {
+        addPoint(row[0], row[1], row[2], idx / 60, idx);
+      }
+    });
+    return finalizeTrajectoryPoints(points);
+  }
+  if (Array.isArray(traj) && typeof traj[0] === 'object' && traj[0] !== null && ('x' in traj[0] || 'y' in traj[0])) {
+    traj.forEach((p, idx) => {
+      if (!p || typeof p !== 'object') return;
+      addPoint(p.x, p.y, p.z, 't' in p ? p.t : idx / 60, idx);
+    });
+    return finalizeTrajectoryPoints(points);
+  }
+  if (typeof traj === 'object') {
+    const {points: nestedPoints} = traj;
+    if (Array.isArray(nestedPoints)) {
+      nestedPoints.forEach((p, idx) => {
+        if (!p) return;
+        addPoint(p.x, p.y, p.z, p.t, idx);
+      });
+      return finalizeTrajectoryPoints(points);
+    }
   }
   console.warn('Unknown trajectory shape:', traj);
   return [];
@@ -407,16 +562,69 @@ function ensureMonotonicTimes(points) {
 }
 
 function sortPlaysChrono(plays) {
-  const halfRank = (tb) => (String(tb).toLowerCase().startsWith('top') ? 0 : 1);
-  const parseSeq = (pid) => {
-    const m = String(pid || '').match(/-(\d+)$/);
-    return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+  const halfRank = (tb) => (String(tb ?? 'Top').toLowerCase().startsWith('top') ? 0 : 1);
+  const compareGame = (a, b) => {
+    const pkA = Number(a.game_pk);
+    const pkB = Number(b.game_pk);
+    const pkAFinite = Number.isFinite(pkA);
+    const pkBFinite = Number.isFinite(pkB);
+    if (pkAFinite && pkBFinite && pkA !== pkB) return pkA - pkB;
+    if (pkAFinite && !pkBFinite) return -1;
+    if (!pkAFinite && pkBFinite) return 1;
+    const dateA = String(a.game_date || '');
+    const dateB = String(b.game_date || '');
+    const dateCmp = dateA.localeCompare(dateB);
+    if (dateCmp !== 0) return dateCmp;
+    const idA = String(a.game_pk ?? a.game_id ?? a.game ?? dateA ?? '');
+    const idB = String(b.game_pk ?? b.game_id ?? b.game ?? dateB ?? '');
+    return idA.localeCompare(idB);
   };
-  return [...plays].sort((a, b) => (
-    (Number(a.inning) || 0) - (Number(b.inning) || 0)
-    || (halfRank(a.topbot ?? a.inning_half) - halfRank(b.topbot ?? b.inning_half))
-    || (parseSeq(a.play_id) - parseSeq(b.play_id))
-  ));
+  const parseSeq = (play) => {
+    const numericCandidates = [
+      play.play_index,
+      play.play_number,
+      play.play_seq,
+      play.sequence,
+      play.index,
+      play.at_bat_index,
+      play.pitch_number,
+    ];
+    for (const candidate of numericCandidates) {
+      const num = Number(candidate);
+      if (Number.isFinite(num)) return num;
+    }
+    const idCandidates = [play.play_id, play.playid, play.event_id, play.at_bat_id];
+    for (const id of idCandidates) {
+      const str = String(id || '');
+      if (!str) continue;
+      const match = str.match(/(\d+)$/);
+      if (match) return parseInt(match[1], 10);
+    }
+    return Number.MAX_SAFE_INTEGER;
+  };
+
+  const decorated = plays.map((play, idx) => ({play, idx}));
+  decorated.sort((a, b) => {
+    const gameCmp = compareGame(a.play, b.play);
+    if (gameCmp !== 0) return gameCmp;
+    const inningCmp = (Number(a.play.inning) || 0) - (Number(b.play.inning) || 0);
+    if (inningCmp !== 0) return inningCmp;
+    const halfCmp = halfRank(a.play.topbot ?? a.play.inning_half) - halfRank(b.play.topbot ?? b.play.inning_half);
+    if (halfCmp !== 0) return halfCmp;
+    const seqCmp = parseSeq(a.play) - parseSeq(b.play);
+    if (seqCmp !== 0) return seqCmp;
+    return a.idx - b.idx;
+  });
+  return decorated.map((entry) => entry.play);
+}
+
+function getConfiguredAnimationDuration() {
+  const raw = theme?.animation?.duration_seconds;
+  if (raw == null) return DEFAULT_ANIMATION_DURATION_SECONDS;
+  const num = Number(raw);
+  if (Number.isFinite(num) && num > 0) return num;
+  if (Number.isFinite(num) && num <= 0) return null;
+  return DEFAULT_ANIMATION_DURATION_SECONDS;
 }
 
 function getAnimationSpeed() {
@@ -445,9 +653,14 @@ function computeDistanceDuration(points, speed) {
 
 function computeTotalDuration(points) {
   if (!Array.isArray(points) || points.length < 2) return 0;
-  const last = points[points.length - 1];
-  const lastTime = Number(last?.t);
-  if (Number.isFinite(lastTime) && lastTime > 0) return lastTime;
+  const firstTime = Number(points[0]?.t);
+  const lastTime = Number(points[points.length - 1]?.t);
+  if (Number.isFinite(firstTime) && Number.isFinite(lastTime)) {
+    const duration = lastTime - firstTime;
+    if (duration > 0) return duration;
+  }
+  const configured = getConfiguredAnimationDuration();
+  if (Number.isFinite(configured) && configured > 0) return configured;
   const distDuration = computeDistanceDuration(points, getAnimationSpeed());
   if (distDuration > 0) return distDuration;
   return Math.max((points.length - 1) / 60, 1);
@@ -470,11 +683,24 @@ async function loadData() {
   const raw = (playlist && playlist.plays) ? playlist.plays : [];
   const plays = [];
   for (const rp of raw) {
-    const p = normalizePlay(rp);
-    if (!p.trajectory_path) continue;
-    const trajRaw = await fetchJSON(p.trajectory_path);
-    const points  = normalizeTrajectory(trajRaw);
-    plays.push({...p, points});
+    const normalized = normalizePlay(rp);
+    let points = [];
+    const directSource = normalized.trajectory_data ?? normalized.points ?? rp.points ?? null;
+    if (directSource) {
+      points = normalizeTrajectory(directSource);
+    }
+    if ((!points || points.length === 0) && typeof normalized.trajectory_path === 'string' && normalized.trajectory_path) {
+      try {
+        const trajRaw = await fetchJSON(normalized.trajectory_path);
+        points = normalizeTrajectory(trajRaw);
+      } catch (err) {
+        console.error(`Failed to load trajectory at ${normalized.trajectory_path}`, err);
+        points = [];
+      }
+    }
+    const playEntry = {...normalized, points};
+    delete playEntry.trajectory_data;
+    plays.push(playEntry);
   }
   state.plays = sortPlaysChrono(plays);
   return config.ballpark; // なくても fallback で描く
@@ -740,40 +966,63 @@ function updateOverlay(info) {
 
 function setupTrajectory(play) {
   clearTrajectory();
+  const points = Array.isArray(play.points) ? play.points : [];
   const lineWidth = theme.trajectory?.line_width || 4;
   const color = new THREE.Color(theme.trajectory?.color || DEFAULT_TRAJECTORY_COLOR);
   const geometry = new LineGeometry();
   const positions = [];
-  play.points.forEach((p) => {
-    const x = Number(p.x) || 0;
-    const y = Number(p.y) || 0;
-    const z = Number(p.z) || 0;
-    positions.push(x, y, z);
+  points.forEach((p) => {
+    positions.push(
+      toFiniteNumber(p?.x, 0),
+      toFiniteNumber(p?.y, 0),
+      toFiniteNumber(p?.z, 0),
+    );
   });
-  geometry.setPositions(positions);
+  if (positions.length >= 6) {
+    geometry.setPositions(positions);
+  } else if (positions.length === 3) {
+    const [x, y, z] = positions;
+    geometry.setPositions([x, y, z, x, y, z]);
+  } else {
+    geometry.setPositions([0, 0, 0, 0, 0, 0]);
+  }
   geometry.setDrawRange(0, 0);
   const material = new LineMaterial({color, linewidth: lineWidth, transparent: true, worldUnits: false});
   material.opacity = theme.trajectory?.base_opacity ?? 0.95;
   material.resolution.set(renderer.domElement.clientWidth, renderer.domElement.clientHeight);
   const line = new Line2(geometry, material);
-  line.computeLineDistances();
+  if (points.length >= 2) {
+    line.computeLineDistances();
+  }
   line.visible = false;
   scene.add(line);
 
   state.trajectoryLine = line;
   state.trajectoryMaterial = material;
-  state.trajectory = play.points;
-  state.duration = computeTotalDuration(play.points);
+  state.trajectory = points;
+  let duration = points.length >= 2 ? computeTotalDuration(points) : 0;
+  if (points.length >= 2 && (!Number.isFinite(duration) || duration <= 0)) {
+    const fallback = getConfiguredAnimationDuration();
+    if (Number.isFinite(fallback) && fallback > 0) {
+      duration = fallback;
+    }
+  }
+  state.duration = points.length >= 2 && Number.isFinite(duration) && duration > 0 ? duration : 0;
   state.elapsed = 0;
   state.currentPointIndex = 0;
   state.visiblePoints = 0;
   state.finished = false;
-  lineTip.set(0, 0, 0);
   const easeName = String(theme?.animation?.ease || 'linear').toLowerCase();
   state.ease = EASING_FUNCTIONS[easeName] || EASING_FUNCTIONS.linear;
-  if (play.points.length) {
-    const first = play.points[0];
-    lineTip.set(Number(first.x) || 0, Number(first.y) || 0, Number(first.z) || 0);
+  if (points.length) {
+    const first = points[0];
+    lineTip.set(
+      toFiniteNumber(first?.x, 0),
+      toFiniteNumber(first?.y, 0),
+      toFiniteNumber(first?.z, 0),
+    );
+  } else {
+    lineTip.set(0, 0, 0);
   }
   updateFollowTarget(true);
   clock?.stop();
@@ -793,6 +1042,7 @@ function clearTrajectory() {
   state.currentPointIndex = 0;
   state.visiblePoints = 0;
   state.finished = false;
+  lineTip.set(0, 0, 0);
 }
 
 function hasTrajectoryTip() {
@@ -819,7 +1069,11 @@ function setDrawCount(count) {
   state.trajectoryLine.geometry?.setDrawRange(0, clamped);
   const shouldShow = clamped >= 2 || (total <= 1 && clamped > 0);
   state.trajectoryLine.visible = shouldShow;
-  if (clamped > 0) updateLineTipFromIndex(clamped - 1);
+  if (clamped > 0) {
+    updateLineTipFromIndex(clamped - 1);
+  } else if (total > 0) {
+    updateLineTipFromIndex(0);
+  }
 }
 
 function updateFollowTarget(force = false) {
@@ -835,21 +1089,12 @@ function restartCurrentPlay() {
   state.elapsed = 0;
   state.finished = false;
   if (!state.trajectoryLine) return;
-  const total = hasTrajectoryTip() ? state.trajectory.length : 0;
-  if (total <= 0) {
-    setDrawCount(0);
-    state.trajectoryLine.visible = false;
-    return;
+  const total = Array.isArray(state.trajectory) ? state.trajectory.length : 0;
+  setDrawCount(0);
+  if (total === 0) {
+    lineTip.set(0, 0, 0);
   }
-  const initial = total >= 2 ? 2 : total;
-  setDrawCount(initial);
   updateFollowTarget(true);
-  if (state.duration <= 0 && total > 0) {
-    // Fall back to instant finish if duration is zero.
-    setDrawCount(total);
-    state.elapsed = state.duration;
-    state.finished = true;
-  }
 }
 
 function finishPlayback() {
@@ -866,9 +1111,13 @@ function finishPlayback() {
 
 function advanceLineAnimation(delta) {
   if (!state.playing) return;
-  if (!hasTrajectoryTip() || !state.trajectoryLine) return;
-  const total = state.trajectory.length;
+  const total = Array.isArray(state.trajectory) ? state.trajectory.length : 0;
+  if (!state.trajectoryLine) {
+    finishPlayback();
+    return;
+  }
   if (total <= 0) {
+    setDrawCount(0);
     finishPlayback();
     return;
   }
@@ -885,7 +1134,7 @@ function advanceLineAnimation(delta) {
   fraction = Math.max(0, Math.min(1, fraction));
   const easedRaw = state.ease ? state.ease(fraction) : fraction;
   const eased = Math.max(0, Math.min(1, easedRaw));
-  let drawTarget = Math.floor(eased * total);
+  let drawTarget = Math.floor(eased * (total - 1)) + 2;
   if (drawTarget < 2) drawTarget = 2;
   if (drawTarget > total) drawTarget = total;
   if (drawTarget !== state.visiblePoints) {
@@ -897,7 +1146,7 @@ function advanceLineAnimation(delta) {
   }
   if (fraction >= 1) {
     setDrawCount(total);
-    state.elapsed = state.duration;
+    state.elapsed = totalDuration;
     finishPlayback();
   }
 }
@@ -1149,7 +1398,17 @@ async function handleCsvFiles(fileList) {
       setStatus(`No playable rows found in ${file.name}`, 'error');
       return;
     }
-    const normalized = plays.map(normalizePlay);
+    const normalized = plays.map((play) => {
+      const base = normalizePlay(play);
+      let points = [];
+      const source = base.trajectory_data ?? base.points ?? play.points ?? null;
+      if (source) {
+        points = normalizeTrajectory(source);
+      }
+      const entry = {...base, points};
+      delete entry.trajectory_data;
+      return entry;
+    });
     state.plays = sortPlaysChrono(normalized);
     state.currentIndex = 0;
     setPlay(0);
